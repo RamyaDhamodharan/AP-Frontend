@@ -1,0 +1,8 @@
+  frontend:
+    build: ./AP-Frontend
+    container_name: ap-frontend-compose
+    ports:
+      - "3000:80"
+    depends_on:
+      - auth
+      - core

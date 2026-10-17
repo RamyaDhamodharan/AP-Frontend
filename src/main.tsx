@@ -1,5 +1,4 @@
-
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios from "axios";
 import "./styles/globals.css";
@@ -7,361 +6,150 @@ import "./styles/globals.css";
 const AUTH_URL = import.meta.env.VITE_AUTH_API_URL;
 const CORE_URL = import.meta.env.VITE_CORE_API_URL;
 
-type DocumentItem = {
+type Doc = {
   id: string;
   original_filename: string;
   status: string;
-  raw_text?: string;
+  extracted_json?: Record<string, unknown> | null;
+  raw_text?: string | null;
+  doc_type?: string | null;
+  failure_message?: string | null;
 };
+
+const labels: Record<string, string> = {
+  received: "Received", parsing: "Parsing", parsed: "Parsed",
+  classified: "Classified", extracted: "Extracted", failed: "Failed",
+  duplicate_blocked: "Duplicate",
+};
+const labelFor = (s: string) => labels[s] ?? s.replaceAll("_", " ");
+const valueFor = (v: unknown) => v == null || v === "" ? "Not available" : typeof v === "object" ? JSON.stringify(v, null, 2) : String(v);
 
 function App() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
-  const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(false);
   const [token, setToken] = useState("");
-  const [documents, setDocuments] = useState<DocumentItem[]>([]);
-  const [selected, setSelected] = useState<DocumentItem | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [docs, setDocs] = useState<Doc[]>([]);
+  const [selected, setSelected] = useState<Doc | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLoading(true);
-    setMessage("");
+  function updateDoc(doc: Doc) {
+    setDocs(old => old.some(d => d.id === doc.id) ? old.map(d => d.id === doc.id ? { ...d, ...doc } : d) : [doc, ...old]);
+    setSelected(old => old?.id === doc.id ? { ...old, ...doc } : doc);
+  }
 
+  async function authSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault(); setBusy(true); setMessage("");
     try {
       if (mode === "register") {
-        await axios.post(`${AUTH_URL}/api/auth/register`, {
-          email,
-          password,
-          full_name: fullName,
-        });
-        setMode("login");
-        setPassword("");
-        setMessage("Registration successful. Please sign in.");
+        await axios.post(`${AUTH_URL}/api/auth/register`, { email, password, full_name: fullName });
+        setMode("login"); setPassword(""); setMessage("Registration successful. Please sign in.");
       } else {
-        const response = await axios.post(`${AUTH_URL}/api/auth/login`, {
-          email,
-          password,
-        });
-        const accessToken =
-          response.data.access_token ?? response.data.accessToken;
-
-        if (accessToken) {
-          setToken(accessToken);
-          setMessage("");
-        } else {
-          setMessage(
-            "Login response received, but no access token was returned. Check the Auth API response format.",
-          );
-        }
+        const r = await axios.post(`${AUTH_URL}/api/auth/login`, { email, password });
+        const t = r.data.access_token ?? r.data.accessToken;
+        if (t) setToken(t); else setMessage("Login response did not include an access token.");
       }
-    } catch (error) {
-      setMessage(
-        axios.isAxiosError(error)
-          ? String(error.response?.data?.detail ?? error.message)
-          : "Something went wrong. Please try again.",
-      );
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) {
+      setMessage(axios.isAxiosError(e) ? String(e.response?.data?.detail ?? e.message) : "Something went wrong.");
+    } finally { setBusy(false); }
   }
 
-  async function uploadDocument(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 20 * 1024 * 1024) {
-      setMessage("File exceeds the 20 MB limit.");
-      event.target.value = "";
-      return;
-    }
-
-    setUploading(true);
-    setMessage("");
-
+  async function processDoc(doc: Doc) {
+    updateDoc({ ...doc, status: "parsing", failure_message: null });
+    setMessage("Processing document: parse → classify → extract…");
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await axios.post(
-        `${CORE_URL}/api/documents/upload`,
-        formData,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      );
-
-      const item: DocumentItem = {
-        id: response.data.id,
-        original_filename: response.data.original_filename ?? file.name,
-        status: response.data.status,
+      const r = await axios.post(`${CORE_URL}/api/documents/${doc.id}/parse`, {}, { headers: { Authorization: `Bearer ${token}` } });
+      const data = r.data ?? {};
+      const updated: Doc = {
+        ...doc, ...data, id: doc.id,
+        original_filename: data.original_filename ?? doc.original_filename,
+        status: data.status ?? "extracted",
+        extracted_json: data.extracted_json ?? data.extracted_data ?? doc.extracted_json,
+        raw_text: data.raw_text ?? data.text ?? doc.raw_text,
       };
-
-      if (item.status === "duplicate_blocked") {
-        setMessage("This document was already uploaded.");
-      } else {
-        setDocuments((previous) => [item, ...previous]);
-        setSelected(item);
-        setMessage("Document uploaded successfully.");
-      }
-    } catch (error) {
-      setMessage(
-        axios.isAxiosError(error)
-          ? String(error.response?.data?.detail ?? error.message)
-          : "Upload failed.",
-      );
-    } finally {
-      setUploading(false);
-      event.target.value = "";
+      updateDoc(updated);
+      setMessage(updated.status === "failed" ? updated.failure_message ?? "Processing failed." : `Processing finished: ${labelFor(updated.status)}.`);
+    } catch (e) {
+      const detail = axios.isAxiosError(e) ? String(e.response?.data?.detail ?? e.message) : "Document processing failed.";
+      updateDoc({ ...doc, status: "failed", failure_message: detail }); setMessage(detail);
     }
   }
 
-  async function parseDocument(item: DocumentItem) {
-    setMessage("");
-
+  async function uploadDoc(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]; if (!file) return;
+    if (file.size > 20 * 1024 * 1024) { setMessage("File exceeds the 20 MB limit."); e.target.value = ""; return; }
+    setBusy(true); setMessage("");
     try {
-      const response = await axios.post(
-        `${CORE_URL}/api/documents/${item.id}/parse`,
-        {},
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
-
-      const updated = { ...item, ...response.data };
-      setDocuments((previous) =>
-        previous.map((doc) => (doc.id === item.id ? updated : doc)),
-      );
-      setSelected(updated);
-      setMessage("Document parsing completed.");
-    } catch (error) {
-      setMessage(
-        axios.isAxiosError(error)
-          ? String(error.response?.data?.detail ?? error.message)
-          : "Document parsing failed.",
-      );
-    }
+      const fd = new FormData(); fd.append("file", file);
+      const r = await axios.post(`${CORE_URL}/api/documents/upload`, fd, { headers: { Authorization: `Bearer ${token}` } });
+      const doc: Doc = { ...r.data, id: r.data.id, original_filename: r.data.original_filename ?? file.name, status: r.data.status ?? "received" };
+      if (doc.status === "duplicate_blocked") setMessage("This document has already been uploaded.");
+      else { updateDoc(doc); await processDoc(doc); }
+    } catch (e) {
+      setMessage(axios.isAxiosError(e) ? String(e.response?.data?.detail ?? e.message) : "Upload failed.");
+    } finally { setBusy(false); e.target.value = ""; }
   }
 
-  if (!token) {
-    return (
-      <main className="shell">
-        <section className="auth-card">
-          <p className="eyebrow">GENWORX / FINANCE OPERATIONS</p>
-          <h1>Accounts Payable Assistant</h1>
-          <p className="muted">
-            {mode === "login"
-              ? "Sign in to your finance workspace."
-              : "Create your associate account."}
-          </p>
+  const filtered = useMemo(() => docs.filter(d =>
+    (!search || d.original_filename.toLowerCase().includes(search.toLowerCase())) &&
+    (filter === "all" || d.status === filter)
+  ), [docs, search, filter]);
+  const count = (statuses: string[]) => docs.filter(d => statuses.includes(d.status)).length;
 
-          <div className="auth-tabs">
-            <button
-              type="button"
-              className={mode === "login" ? "active" : ""}
-              onClick={() => {
-                setMode("login");
-                setMessage("");
-              }}
-            >
-              Sign in
-            </button>
-            <button
-              type="button"
-              className={mode === "register" ? "active" : ""}
-              onClick={() => {
-                setMode("register");
-                setMessage("");
-              }}
-            >
-              Register
-            </button>
-          </div>
+  if (!token) return <main className="auth-shell">
+    <section className="auth-hero">
+      <div className="brand brand-light"><span className="brand-mark">G</span><span>GENWORX<small>FINANCE AUTOMATION</small></span></div>
+      <div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE · AI WORKSPACE</span><h1>Less paperwork.<br /><em>More clarity.</em></h1><p>Invoices, payment advice, and purchase documents in one intelligent workspace.</p></div>
+      <small className="hero-foot">● Document intelligence platform</small>
+    </section>
+    <section className="auth-side"><div className="auth-card">
+      <div className="brand mobile-brand"><span className="brand-mark">G</span> GENWORX</div>
+      <span className="eyebrow purple">WELCOME TO GENWORX</span><h2>{mode === "login" ? "Sign in to your workspace" : "Create your account"}</h2><p className="muted">{mode === "login" ? "Pick up where your finance team left off." : "Set up your finance workspace access."}</p>
+      <div className="tabs"><button className={mode === "login" ? "active" : ""} type="button" onClick={() => { setMode("login"); setMessage(""); }}>Sign in</button><button className={mode === "register" ? "active" : ""} type="button" onClick={() => { setMode("register"); setMessage(""); }}>Register</button></div>
+      <form className="form-stack" onSubmit={authSubmit}>
+        {mode === "register" && <label>Full name<input value={fullName} onChange={e => setFullName(e.target.value)} minLength={2} maxLength={150} placeholder="Your name" required /></label>}
+        <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" autoComplete="email" required /></label>
+        <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} minLength={mode === "register" ? 12 : 1} maxLength={128} placeholder="Enter your password" autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
+        <button className="primary full" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in →" : "Create account →"}</button>
+      </form>
+      {message && <p className="notice">{message}</p>}<p className="auth-foot">Secure access · GenWorx AP Assistant</p>
+    </div></section>
+  </main>;
 
-          <form onSubmit={handleSubmit} className="form-stack">
-            {mode === "register" && (
-              <label>
-                Full name
-                <input
-                  value={fullName}
-                  onChange={(event) => setFullName(event.target.value)}
-                  minLength={2}
-                  maxLength={150}
-                  required
-                />
-              </label>
-            )}
-            <label>
-              Email
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                minLength={mode === "register" ? 12 : 1}
-                maxLength={128}
-                required
-              />
-            </label>
-            <button className="primary-button" disabled={loading}>
-              {loading
-                ? "Please wait..."
-                : mode === "login"
-                  ? "Sign in"
-                  : "Create account"}
-            </button>
-          </form>
-
-          {message && <p className="notice" role="status">{message}</p>}
-          <p className="footnote">Secure access / GenWorx AP</p>
+  return <main className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><span className="brand-mark">G</span><span>GENWORX<small>AP ASSISTANT</small></span></div>
+      <p className="side-label">WORKSPACE</p><div className="nav-active">▦ <span>Documents</span><b>{docs.length}</b></div>
+      <div className="side-bottom"><div className="ai-note"><span>✦</span><div><b>AI-powered processing</b><small>Parse · Classify · Extract</small></div></div><button className="signout" onClick={() => { setToken(""); setDocs([]); setSelected(null); setMessage(""); }}>↪ <span>Sign out</span></button><div className="profile"><span className="avatar">{(email[0] ?? "U").toUpperCase()}</span><div><b>{email}</b><small>Finance workspace</small></div></div></div>
+    </aside>
+    <section className="main-area">
+      <header className="topbar"><div>Workspace <span>/</span> <b>Documents</b></div><div className="top-right"><i /> System workspace <span className="avatar">{(email[0] ?? "U").toUpperCase()}</span></div></header>
+      <div className="content">
+        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Document workspace</h1><p className="muted">Upload, process, and review your accounts payable documents.</p></div><label className={`primary upload ${busy ? "disabled" : ""}`}>＋ Upload document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label></header>
+        {message && <div className={`notice ${message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "error" : ""}`}>{message}</div>}
+        <section className="stats">
+          <article><div>Total documents <span className="stat-icon violet">▤</span></div><strong>{docs.length}</strong><small>In this session</small></article>
+          <article><div>Processing <span className="stat-icon amber">◷</span></div><strong>{count(["received","parsing","parsed","classified"])}</strong><small>In the pipeline</small></article>
+          <article><div>Extracted <span className="stat-icon green">✓</span></div><strong>{count(["extracted"])}</strong><small>Ready for review</small></article>
+          <article><div>Needs attention <span className="stat-icon red">!</span></div><strong>{count(["failed"])}</strong><small>Failed processing</small></article>
         </section>
-      </main>
-    );
-  }
-
-  return (
-    <main className="dashboard">
-      <aside className="sidebar">
-        <p className="eyebrow">GENWORX</p>
-        <h2>AP Assistant</h2>
-        <p className="muted">Finance workspace</p>
-        <div className="sidebar-link active">Documents</div>
-        <button
-          className="secondary-button"
-          onClick={() => {
-            setToken("");
-            setDocuments([]);
-            setSelected(null);
-            setMessage("");
-          }}
-        >
-          Sign out
-        </button>
-      </aside>
-
-      <section className="workspace">
-        <header className="page-header">
-          <div>
-            <p className="eyebrow">FINANCE OPERATIONS</p>
-            <h1>Document workspace</h1>
-            <p className="muted">
-              Upload documents and extract their text for review.
-            </p>
-          </div>
-          <label className="primary-button upload-button">
-            {uploading ? "Uploading..." : "＋ Upload document"}
-            <input
-              type="file"
-              accept=".pdf,.png,.jpg,.jpeg,.eml"
-              onChange={uploadDocument}
-              disabled={uploading}
-              hidden
-            />
-          </label>
-        </header>
-
-        {message && <p className="notice" role="status">{message}</p>}
-
-        <div className="status-grid">
-          <article>
-            <span>Total documents</span>
-            <strong>{documents.length}</strong>
-            <small>Uploaded this session</small>
-          </article>
-          <article>
-            <span>Parsed</span>
-            <strong>
-              {documents.filter((doc) => doc.status === "parsed").length}
-            </strong>
-            <small>Text extraction completed</small>
-          </article>
-          <article>
-            <span>Awaiting parsing</span>
-            <strong>
-              {documents.filter((doc) => doc.status === "received").length}
-            </strong>
-            <small>Ready to process</small>
-          </article>
-        </div>
-
         <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Uploaded documents</h2>
-              <p className="muted">Select a document to review its status.</p>
-            </div>
-          </div>
-
-          {documents.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-icon">↑</span>
-              <h3>No documents yet</h3>
-              <p>Upload a PDF, image, or email file to get started.</p>
-            </div>
-          ) : (
-            <div className="document-list">
-              {documents.map((doc) => (
-                <article
-                  className={`document-row ${selected?.id === doc.id ? "selected" : ""}`}
-                  key={doc.id}
-                >
-                  <button
-                    className="document-name"
-                    onClick={() => setSelected(doc)}
-                  >
-                    <span className="file-icon">FILE</span>
-                    <span>
-                      <strong>{doc.original_filename}</strong>
-                      <small>{doc.id}</small>
-                    </span>
-                  </button>
-                  <span className={`status-pill ${doc.status}`}>
-                    {doc.status}
-                  </span>
-                  {doc.status === "received" && (
-                    <button
-                      className="secondary-button"
-                      onClick={() => parseDocument(doc)}
-                    >
-                      Parse
-                    </button>
-                  )}
-                </article>
-              ))}
-            </div>
-          )}
+          <div className="panel-head"><div><h2>Documents</h2><p className="muted">Your uploaded files and processing status.</p></div><span className="count">{filtered.length} files</span></div>
+          <div className="toolbar"><label className="search">⌕ <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search documents…" /></label><select value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filter documents"><option value="all">All statuses</option><option value="received">Received</option><option value="parsing">Parsing</option><option value="parsed">Parsed</option><option value="classified">Classified</option><option value="extracted">Extracted</option><option value="failed">Failed</option></select></div>
+          {filtered.length ? <div className="table-wrap"><table><thead><tr><th>DOCUMENT</th><th>STATUS</th><th>TYPE</th><th></th></tr></thead><tbody>{filtered.map(d => <tr key={d.id} className={selected?.id === d.id ? "selected-row" : ""} onClick={() => setSelected(d)}><td><div className="file"><span className="file-badge">PDF</span><div><b>{d.original_filename}</b><small>{d.id.slice(0,8)}…</small></div></div></td><td><span className={`pill ${d.status}`}><i />{labelFor(d.status)}</span></td><td>{d.doc_type ?? (d.extracted_json?.document_type as string | undefined) ?? "—"}</td><td><button className="view" onClick={e => { e.stopPropagation(); setSelected(d); }}>View details ↗</button></td></tr>)}</tbody></table></div> : <div className="empty"><div className="empty-icon">↑</div><h3>{docs.length ? "No matching documents" : "Your workspace is ready"}</h3><p>{docs.length ? "Try another search or status filter." : "Upload your first invoice or payment advice to start extracting data."}</p>{!docs.length && <label className="secondary">Choose a document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label>}</div>}
         </section>
-
-        {selected && (
-          <section className="panel">
-            <h2>Document details</h2>
-            <p><strong>Filename:</strong> {selected.original_filename}</p>
-            <p><strong>Status:</strong> {selected.status}</p>
-            <p><strong>Document ID:</strong> {selected.id}</p>
-            <h3>Extracted text</h3>
-            <pre className="text-preview">
-              {selected.raw_text ??
-                "No extracted text available yet. Select Parse to process this document."}
-            </pre>
-            <p className="muted">
-              Classification will be connected when the backend endpoint is available.
-            </p>
-          </section>
-        )}
-      </section>
-    </main>
-  );
+        {selected && <section className="panel details"><div className="panel-head"><div><span className="eyebrow purple">DOCUMENT REVIEW</span><h2>{selected.original_filename}</h2><p className="muted">ID: {selected.id}</p></div><span className={`pill ${selected.status}`}><i />{labelFor(selected.status)}</span></div>
+          {selected.failure_message && <div className="notice error">{selected.failure_message}</div>}
+          {selected.extracted_json && Object.keys(selected.extracted_json).length ? <div className="extraction"><div className="extract-title"><div><h3>Extracted fields</h3><p className="muted">Values identified by the extraction pipeline.</p></div><b>✓ Extraction saved</b></div><div className="field-grid">{Object.entries(selected.extracted_json).map(([key,value]) => <article className="field" key={key}><span>{key.replaceAll("_"," ")}</span><strong className={value == null ? "missing" : ""}>{valueFor(value)}</strong></article>)}</div></div> : <div className="detail-empty"><span>⌁</span><div><b>{selected.status === "failed" ? "Processing needs attention" : "No extracted fields returned in the API response"}</b><p className="muted">Status: {labelFor(selected.status)}. If the database has extracted_json but this panel is empty, the parse endpoint response needs to return those fields or the frontend must fetch the document details endpoint.</p></div>{selected.status === "failed" && <button className="secondary" onClick={() => void processDoc(selected)}>Retry processing</button>}</div>}
+          {selected.raw_text && <details className="raw"><summary>View parsed text</summary><pre>{selected.raw_text}</pre></details>}
+        </section>}
+        <footer className="footer"><span>GENWORX AP ASSISTANT</span><span>Document intelligence · Finance operations</span></footer>
+      </div>
+    </section>
+  </main>;
 }
-
 ReactDOM.createRoot(document.getElementById("root")!).render(<App />);

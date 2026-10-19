@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios from "axios";
 import "./styles/globals.css";
@@ -16,6 +16,25 @@ type Doc = {
   raw_text?: string | null;
   doc_type?: string | null;
   failure_message?: string | null;
+};
+
+type Invoice = {
+  invoice_id: string;
+  invoice_no?: string | null;
+  vendor_name?: string | null;
+  invoice_date?: string | null;
+  due_date?: string | null;
+  total_amount?: number | string | null;
+  currency?: string | null;
+  match_status?: string | null;
+  final_status?: string | null;
+};
+
+type InvoiceResponse = {
+  items: Invoice[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 const labels: Record<string, string> = {
@@ -38,7 +57,66 @@ function App() {
   const [selected, setSelected] = useState<Doc | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
 
+  async function loadInvoices() {
+    if (!token) {
+      setInvoices([]);
+      return;
+    }
+
+    try {
+      const response = await axios.get<InvoiceResponse>(
+        `${CORE_URL}/api/invoices/review-queue?page=1&page_size=100`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setInvoices(response.data.items ?? []);
+    } catch (error) {
+      setMessage(
+        axios.isAxiosError(error)
+          ? String(error.response?.data?.detail ?? error.message)
+          : "Could not load invoice review queue."
+      );
+    }
+  }
+
+  useEffect(() => {
+    void loadInvoices();
+  }, [token]);
+
+  async function reviewInvoice(
+    invoice: Invoice,
+    decision: "approved" | "rejected" | "on_hold"
+  ) {
+    const invoiceLabel = invoice.invoice_no ?? invoice.invoice_id;
+
+    if (!window.confirm(`Confirm ${decision} for invoice ${invoiceLabel}?`)) {
+      return;
+    }
+
+    setReviewBusyId(invoice.invoice_id);
+    setMessage("");
+
+    try {
+      await axios.post(
+        `${CORE_URL}/api/invoices/${invoice.invoice_id}/review`,
+        { decision },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      setMessage(`Invoice ${invoiceLabel}: ${decision}.`);
+      await loadInvoices();
+    } catch (error) {
+      setMessage(
+        axios.isAxiosError(error)
+          ? String(error.response?.data?.detail ?? error.message)
+          : "Review action failed."
+      );
+    } finally {
+      setReviewBusyId(null);
+    }
+  }
   function updateDoc(doc: Doc) {
     setDocs(old => old.some(d => d.id === doc.id) ? old.map(d => d.id === doc.id ? { ...d, ...doc } : d) : [doc, ...old]);
     setSelected(old => old?.id === doc.id ? { ...old, ...doc } : doc);
@@ -62,7 +140,7 @@ function App() {
 
   async function processDoc(doc: Doc) {
     updateDoc({ ...doc, status: "parsing", failure_message: null });
-    setMessage("Processing document: parse → classify → extract…");
+    setMessage("Processing document: parse â†’ classify â†’ extractâ€¦");
     try {
       const r = await axios.post(`${CORE_URL}/api/documents/${doc.id}/parse`, {}, { headers: { Authorization: `Bearer ${token}` } });
       const data = r.data ?? {};
@@ -105,8 +183,8 @@ function App() {
   if (!token) return <main className="auth-shell">
     <section className="auth-hero">
       <div className="brand brand-light"><span className="brand-mark">G</span><span>GENWORX<small>FINANCE AUTOMATION</small></span></div>
-      <div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE · AI WORKSPACE</span><h1>Less paperwork.<br /><em>More clarity.</em></h1><p>Invoices, payment advice, and purchase documents in one intelligent workspace.</p></div>
-      <small className="hero-foot">● Document intelligence platform</small>
+      <div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE Â· AI WORKSPACE</span><h1>Less paperwork.<br /><em>More clarity.</em></h1><p>Invoices, payment advice, and purchase documents in one intelligent workspace.</p></div>
+      <small className="hero-foot">â— Document intelligence platform</small>
     </section>
     <section className="auth-side"><div className="auth-card">
       <div className="brand mobile-brand"><span className="brand-mark">G</span> GENWORX</div>
@@ -116,42 +194,124 @@ function App() {
         {mode === "register" && <label>Full name<input value={fullName} onChange={e => setFullName(e.target.value)} minLength={2} maxLength={150} placeholder="Your name" required /></label>}
         <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" autoComplete="email" required /></label>
         <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} minLength={mode === "register" ? 12 : 1} maxLength={128} placeholder="Enter your password" autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
-        <button className="primary full" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in →" : "Create account →"}</button>
+        <button className="primary full" disabled={busy}>{busy ? "Please waitâ€¦" : mode === "login" ? "Sign in â†’" : "Create account â†’"}</button>
       </form>
-      {message && <p className="notice">{message}</p>}<p className="auth-foot">Secure access · GenWorx AP Assistant</p>
+      {message && <p className="notice">{message}</p>}<p className="auth-foot">Secure access Â· GenWorx AP Assistant</p>
     </div></section>
   </main>;
 
   return <main className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">G</span><span>GENWORX<small>AP ASSISTANT</small></span></div>
-      <p className="side-label">WORKSPACE</p><div className="nav-active">▦ <span>Documents</span><b>{docs.length}</b></div>
-      <div className="side-bottom"><div className="ai-note"><span>✦</span><div><b>AI-powered processing</b><small>Parse · Classify · Extract</small></div></div><button className="signout" onClick={() => { setToken(""); setDocs([]); setSelected(null); setMessage(""); }}>↪ <span>Sign out</span></button><div className="profile"><span className="avatar">{(email[0] ?? "U").toUpperCase()}</span><div><b>{email}</b><small>Finance workspace</small></div></div></div>
+      <p className="side-label">WORKSPACE</p><div className="nav-active">â–¦ <span>Documents</span><b>{docs.length}</b></div>
+      <div className="side-bottom"><div className="ai-note"><span>âœ¦</span><div><b>AI-powered processing</b><small>Parse Â· Classify Â· Extract</small></div></div><button className="signout" onClick={() => { setToken(""); setDocs([]); setSelected(null); setMessage(""); }}>â†ª <span>Sign out</span></button><div className="profile"><span className="avatar">{(email[0] ?? "U").toUpperCase()}</span><div><b>{email}</b><small>Finance workspace</small></div></div></div>
     </aside>
     <section className="main-area">
       <header className="topbar"><div>Workspace <span>/</span> <b>Documents</b></div><div className="top-right"><i /> System workspace <span className="avatar">{(email[0] ?? "U").toUpperCase()}</span></div></header>
       <div className="content">
-        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Document workspace</h1><p className="muted">Upload, process, and review your accounts payable documents.</p></div><label className={`primary upload ${busy ? "disabled" : ""}`}>＋ Upload document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label></header>
+        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Document workspace</h1><p className="muted">Upload, process, and review your accounts payable documents.</p></div><label className={`primary upload ${busy ? "disabled" : ""}`}>ï¼‹ Upload document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label></header>
         {message && <div className={`notice ${message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "error" : ""}`}>{message}</div>}
         <section className="stats">
-          <article><div>Total documents <span className="stat-icon violet">▤</span></div><strong>{docs.length}</strong><small>In this session</small></article>
-          <article><div>Processing <span className="stat-icon amber">◷</span></div><strong>{count(["received","parsing","parsed","classified"])}</strong><small>In the pipeline</small></article>
-          <article><div>Extracted <span className="stat-icon green">✓</span></div><strong>{count(["extracted"])}</strong><small>Ready for review</small></article>
+          <article><div>Total documents <span className="stat-icon violet">â–¤</span></div><strong>{docs.length}</strong><small>In this session</small></article>
+          <article><div>Processing <span className="stat-icon amber">â—·</span></div><strong>{count(["received","parsing","parsed","classified"])}</strong><small>In the pipeline</small></article>
+          <article><div>Extracted <span className="stat-icon green">âœ“</span></div><strong>{count(["extracted"])}</strong><small>Ready for review</small></article>
           <article><div>Needs attention <span className="stat-icon red">!</span></div><strong>{count(["failed"])}</strong><small>Failed processing</small></article>
         </section>
         <section className="panel">
+  <div className="panel-head">
+    <div>
+      <h2>Invoice review queue</h2>
+      <p className="muted">Review extracted invoices and matching status.</p>
+    </div>
+    <button className="secondary" onClick={() => void loadInvoices()}>
+      Refresh
+    </button>
+  </div>
+
+  {invoices.length > 0 ? (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice</th>
+            <th>Vendor</th>
+            <th>Amount</th>
+            <th>Match status</th>
+            <th>Decision</th>
+          </tr>
+        </thead>
+        <tbody>
+          {invoices.map(invoice => {
+            const blockedStatuses = [
+              "pending",
+              "needs_vendor_review",
+              "waiting_for_po",
+              "needs_po_confirmation",
+              "match_issues",
+              "no_match"
+            ];
+            const busy = reviewBusyId === invoice.invoice_id;
+            const status = invoice.match_status ?? "pending";
+
+            return (
+              <tr key={invoice.invoice_id}>
+                <td>{invoice.invoice_no ?? invoice.invoice_id}</td>
+                <td>{invoice.vendor_name ?? "Unknown vendor"}</td>
+                <td>
+                  {invoice.total_amount == null
+                    ? "—"
+                    : `${invoice.currency ?? ""} ${invoice.total_amount}`}
+                </td>
+                <td>{status}</td>
+                <td>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button
+                      className="primary"
+                      disabled={busy || blockedStatuses.includes(status)}
+                      onClick={() => void reviewInvoice(invoice, "approved")}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void reviewInvoice(invoice, "rejected")}
+                    >
+                      Reject
+                    </button>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void reviewInvoice(invoice, "on_hold")}
+                    >
+                      Hold
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <p>No invoices in the review queue.</p>
+  )}
+</section>
+<section className="panel">
           <div className="panel-head"><div><h2>Documents</h2><p className="muted">Your uploaded files and processing status.</p></div><span className="count">{filtered.length} files</span></div>
-          <div className="toolbar"><label className="search">⌕ <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search documents…" /></label><select value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filter documents"><option value="all">All statuses</option><option value="received">Received</option><option value="parsing">Parsing</option><option value="parsed">Parsed</option><option value="classified">Classified</option><option value="extracted">Extracted</option><option value="failed">Failed</option></select></div>
-          {filtered.length ? <div className="table-wrap"><table><thead><tr><th>DOCUMENT</th><th>STATUS</th><th>TYPE</th><th></th></tr></thead><tbody>{filtered.map(d => <tr key={d.id} className={selected?.id === d.id ? "selected-row" : ""} onClick={() => setSelected(d)}><td><div className="file"><span className="file-badge">PDF</span><div><b>{d.original_filename}</b><small>{d.id.slice(0,8)}…</small></div></div></td><td><span className={`pill ${d.status}`}><i />{labelFor(d.status)}</span></td><td>{d.doc_type ?? (d.extracted_json?.document_type as string | undefined) ?? "—"}</td><td><button className="view" onClick={e => { e.stopPropagation(); setSelected(d); }}>View details ↗</button></td></tr>)}</tbody></table></div> : <div className="empty"><div className="empty-icon">↑</div><h3>{docs.length ? "No matching documents" : "Your workspace is ready"}</h3><p>{docs.length ? "Try another search or status filter." : "Upload your first invoice or payment advice to start extracting data."}</p>{!docs.length && <label className="secondary">Choose a document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label>}</div>}
+          <div className="toolbar"><label className="search">âŒ• <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search documentsâ€¦" /></label><select value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filter documents"><option value="all">All statuses</option><option value="received">Received</option><option value="parsing">Parsing</option><option value="parsed">Parsed</option><option value="classified">Classified</option><option value="extracted">Extracted</option><option value="failed">Failed</option></select></div>
+          {filtered.length ? <div className="table-wrap"><table><thead><tr><th>DOCUMENT</th><th>STATUS</th><th>TYPE</th><th></th></tr></thead><tbody>{filtered.map(d => <tr key={d.id} className={selected?.id === d.id ? "selected-row" : ""} onClick={() => setSelected(d)}><td><div className="file"><span className="file-badge">PDF</span><div><b>{d.original_filename}</b><small>{d.id.slice(0,8)}â€¦</small></div></div></td><td><span className={`pill ${d.status}`}><i />{labelFor(d.status)}</span></td><td>{d.doc_type ?? (d.extracted_json?.document_type as string | undefined) ?? "â€”"}</td><td><button className="view" onClick={e => { e.stopPropagation(); setSelected(d); }}>View details â†—</button></td></tr>)}</tbody></table></div> : <div className="empty"><div className="empty-icon">â†‘</div><h3>{docs.length ? "No matching documents" : "Your workspace is ready"}</h3><p>{docs.length ? "Try another search or status filter." : "Upload your first invoice or payment advice to start extracting data."}</p>{!docs.length && <label className="secondary">Choose a document<input type="file" accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={uploadDoc} disabled={busy} hidden /></label>}</div>}
         </section>
         {selected && <section className="panel details"><div className="panel-head"><div><span className="eyebrow purple">DOCUMENT REVIEW</span><h2>{selected.original_filename}</h2><p className="muted">ID: {selected.id}</p></div><span className={`pill ${selected.status}`}><i />{labelFor(selected.status)}</span></div>
           {selected.failure_message && <div className="notice error">{selected.failure_message}</div>}
-          {selected.extracted_json && Object.keys(selected.extracted_json).length ? <div className="extraction"><div className="extract-title"><div><h3>Extracted fields</h3><p className="muted">Values identified by the extraction pipeline.</p></div><b>✓ Extraction saved</b></div><div className="field-grid">{Object.entries(selected.extracted_json).map(([key,value]) => <article className="field" key={key}><span>{key.replaceAll("_"," ")}</span><strong className={value == null ? "missing" : ""}>{valueFor(value)}</strong></article>)}</div></div> : <div className="detail-empty"><span>⌁</span><div><b>{selected.status === "failed" ? "Processing needs attention" : "No extracted fields returned in the API response"}</b><p className="muted">Status: {labelFor(selected.status)}. If the database has extracted_json but this panel is empty, the parse endpoint response needs to return those fields or the frontend must fetch the document details endpoint.</p></div>{selected.status === "failed" && <button className="secondary" onClick={() => void processDoc(selected)}>Retry processing</button>}</div>}
+          {selected.extracted_json && Object.keys(selected.extracted_json).length ? <div className="extraction"><div className="extract-title"><div><h3>Extracted fields</h3><p className="muted">Values identified by the extraction pipeline.</p></div><b>âœ“ Extraction saved</b></div><div className="field-grid">{Object.entries(selected.extracted_json).map(([key,value]) => <article className="field" key={key}><span>{key.replaceAll("_"," ")}</span><strong className={value == null ? "missing" : ""}>{valueFor(value)}</strong></article>)}</div></div> : <div className="detail-empty"><span>âŒ</span><div><b>{selected.status === "failed" ? "Processing needs attention" : "No extracted fields returned in the API response"}</b><p className="muted">Status: {labelFor(selected.status)}. If the database has extracted_json but this panel is empty, the parse endpoint response needs to return those fields or the frontend must fetch the document details endpoint.</p></div>{selected.status === "failed" && <button className="secondary" onClick={() => void processDoc(selected)}>Retry processing</button>}</div>}
           {selected.raw_text && <details className="raw"><summary>View parsed text</summary><pre>{selected.raw_text}</pre></details>}
         </section>}
-        <footer className="footer"><span>GENWORX AP ASSISTANT</span><span>Document intelligence · Finance operations</span></footer>
+        <footer className="footer"><span>GENWORX AP ASSISTANT</span><span>Document intelligence Â· Finance operations</span></footer>
       </div>
     </section>
   </main>;
 }
 ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
+

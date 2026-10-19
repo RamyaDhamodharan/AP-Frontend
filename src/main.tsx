@@ -3,8 +3,10 @@ import ReactDOM from "react-dom/client";
 import axios from "axios";
 import "./styles/globals.css";
 
-const AUTH_URL = import.meta.env.VITE_AUTH_API_URL;
-const CORE_URL = import.meta.env.VITE_CORE_API_URL;
+
+const AUTH_URL = import.meta.env.VITE_AUTH_API_BASE_URL;
+const CORE_URL = import.meta.env.VITE_AP_API_BASE_URL;
+
 
 type Doc = {
   id: string;

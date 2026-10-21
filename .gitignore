@@ -17,3 +17,10 @@ htmlcov/
 *.tsbuildinfo
 
 .vite/
+
+.env
+dist/
+node_modules/
+.vite/
+*.bak
+*.tsbuildinfo

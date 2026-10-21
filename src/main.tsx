@@ -68,6 +68,9 @@ type Doc = {
   raw_text?: string | null;
   doc_type?: string | null;
   failure_message?: string | null;
+  email_sender?: string | null;
+  email_subject?: string | null;
+  email_received_at?: string | null;
   created_at?: string;
   updated_at?: string;
   audit_history?: { action: string; result: string; message?: string | null; created_by?: string | null; created_at: string }[];
@@ -161,6 +164,7 @@ function App() {
   const [selected, setSelected] = useState<Doc | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [reclassifyType, setReclassifyType] = useState("invoice");
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
   const [goodsReceipts, setGoodsReceipts] = useState<GoodsReceipt[]>([]);
@@ -265,7 +269,7 @@ function App() {
   }
 
   async function pollDocument(documentId: string) {
-    const terminal = new Set(["extracted", "needs_vendor_review", "incomplete", "failed", "processed", "ignored"]);
+    const terminal = new Set(["extracted", "needs_vendor_review", "incomplete", "failed", "processed", "ignored", "other"]);
     let latest: Doc | null = null;
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise(resolve => window.setTimeout(resolve, 1500));
@@ -596,6 +600,17 @@ function App() {
     finally { setBusy(false); }
   }
 
+  async function reclassifyDocument(doc: Doc) {
+    setBusy(true);
+    try {
+      await axios.post(`${CORE_URL}/api/documents/${doc.id}/reclassify`, { doc_type: reclassifyType }, { headers: authHeaders() });
+      setMessage("Reclassification queued.");
+      setSelected({ ...doc, doc_type: reclassifyType, status: "received" });
+      await loadDocuments(1, filter);
+    } catch (error) { reportApiError(error, "Could not reclassify document."); }
+    finally { setBusy(false); }
+  }
+
   async function runInvoiceMatch(invoice: Invoice) {
     setMatchingInvoiceId(invoice.invoice_id); setMatchingBusyId(invoice.invoice_id); setMatchingResult(null); setMatchingError(""); setMessage("");
     try {
@@ -822,7 +837,7 @@ function App() {
 </section>
 <section className="panel">
           <div className="panel-head"><div><h2>Documents</h2><p className="muted">Your uploaded files and processing status.</p></div><span className="count">{docsTotal} files</span><button className="secondary" disabled={docsLoading} onClick={() => void loadDocuments(1, filter)}>{docsLoading ? "Loading..." : "Refresh"}</button></div>
-          <div className="toolbar"><label className="search">X <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search this page..." /></label><select value={filter} onChange={e => { setDocsPage(1); setFilter(e.target.value); }} aria-label="Filter documents"><option value="all">All statuses</option><option value="received">Received</option><option value="parsing">Parsing</option><option value="parsed">Parsed</option><option value="classified">Classified</option><option value="extracted">Extracted</option><option value="needs_vendor_review">Needs vendor review</option><option value="incomplete">Incomplete</option><option value="processed">Processed</option><option value="failed">Failed</option><option value="ignored">Ignored</option></select></div>
+          <div className="toolbar"><label className="search">X <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search this page..." /></label><select value={filter} onChange={e => { setDocsPage(1); setFilter(e.target.value); }} aria-label="Filter documents"><option value="all">All statuses</option><option value="other">Other documents</option><option value="received">Received</option><option value="parsing">Parsing</option><option value="parsed">Parsed</option><option value="classified">Classified</option><option value="extracted">Extracted</option><option value="needs_vendor_review">Needs vendor review</option><option value="incomplete">Incomplete</option><option value="processed">Processed</option><option value="failed">Failed</option><option value="ignored">Ignored</option></select></div>
           {docsError && <div className="notice error">{docsError}</div>}
            {docsError && (
             <div className="notice error">{docsError}</div>
@@ -940,6 +955,8 @@ function App() {
             </button>
           </div>
         {selected && <section className="panel details"><div className="panel-head"><div><span className="eyebrow purple">DOCUMENT REVIEW</span><h2>{selected.original_filename}</h2><p className="muted">ID: {selected.id}</p></div><span className={`pill ${selected.status}`}><i />{labelFor(selected.status)}</span></div>
+          {selected.email_sender && <p className="muted">Email from {selected.email_sender}{selected.email_subject ? ` · ${selected.email_subject}` : ""}{selected.email_received_at ? ` · ${new Date(selected.email_received_at).toLocaleString()}` : ""}</p>}
+          {selected.status === "other" && <div className="toolbar"><label>Reclassify as<select value={reclassifyType} onChange={event => setReclassifyType(event.target.value)}><option value="invoice">Invoice</option><option value="po">Purchase order</option><option value="goods_receipt">Goods receipt</option></select></label><button className="secondary" disabled={busy} onClick={() => void reclassifyDocument(selected)}>{busy ? "Queuing..." : "Reclassify"}</button></div>}
           {selected.failure_message && <div className="notice error">{selected.failure_message}</div>}
           {selected.doc_type === "po" && selected.status === "needs_vendor_review" && <div className="extraction"><div className="extract-title"><div><h3>Resolve purchase order vendor</h3><p className="muted">Extracted vendor: {String(selected.extracted_json?.vendor ?? "Not identified")}. Choose an existing vendor or explicitly create one.</p></div></div><div className="field-grid"><label>Review option<select value={vendorReviewNewMode ? "new" : "existing"} onChange={event => { setVendorReviewNewMode(event.target.value === "new"); setVendorReviewError(""); }}><option value="existing">Select existing vendor</option><option value="new">Create new vendor</option></select></label>{!vendorReviewNewMode ? <><label>Search vendors<input value={vendorSearch} maxLength={120} onChange={event => { setVendorSearch(event.target.value); void loadVendors(event.target.value); }} /></label><label>Existing vendor<select value={vendorChoice} onChange={event => setVendorChoice(event.target.value)}><option value="">Select vendor</option>{vendors.map(vendor => <option key={vendor.id} value={vendor.id}>{vendor.name}{vendor.tax_id ? ` · ${vendor.tax_id}` : ""}</option>)}</select></label></> : <><label>Vendor name<input value={newVendor.name} maxLength={200} onChange={event => setNewVendor(old => ({ ...old, name: event.target.value }))} /></label><label>Tax ID<input value={newVendor.tax_id} maxLength={30} onChange={event => setNewVendor(old => ({ ...old, tax_id: event.target.value }))} /></label><label>Contact email<input type="email" value={newVendor.contact_email} maxLength={200} onChange={event => setNewVendor(old => ({ ...old, contact_email: event.target.value }))} /></label><label>Contact phone<input value={newVendor.contact_phone} maxLength={40} onChange={event => setNewVendor(old => ({ ...old, contact_phone: event.target.value }))} /></label><label>Contact name<input value={newVendor.contact_name} maxLength={120} onChange={event => setNewVendor(old => ({ ...old, contact_name: event.target.value }))} /></label></>}</div>{vendorReviewError && <p className="notice error">{vendorReviewError}</p>}<button className="primary" disabled={vendorReviewBusy || (!vendorReviewNewMode && !vendorChoice) || (vendorReviewNewMode && (!newVendor.name.trim() || !(newVendor.tax_id.trim() || newVendor.contact_email.trim() || newVendor.contact_phone.trim())))} onClick={() => void resolvePurchaseOrderVendor(selected)}>{vendorReviewBusy ? "Saving PO..." : vendorReviewNewMode ? "Create vendor and save PO" : "Confirm vendor and save PO"}</button></div>}
           {selected.extracted_json && Object.keys(selected.extracted_json).length ? <div className="extraction"><div className="extract-title"><div><h3>Extracted fields</h3><p className="muted">Values identified by the extraction pipeline.</p></div><b>OK Extraction saved</b></div><div className="field-grid">{Object.entries(selected.extracted_json).map(([key,value]) => <article className="field" key={key}><span>{key.replaceAll("_"," ")}</span><strong className={value == null ? "missing" : ""}>{valueFor(value)}</strong></article>)}</div></div> : <div className="detail-empty"><span>âŒ</span><div><b>{selected.status === "failed" ? "Processing needs attention" : "No extracted fields returned yet"}</b><p className="muted">Status: {labelFor(selected.status)}.{selected.failure_message ? ` ${selected.failure_message}` : " Extraction fields will appear here after processing finishes."}</p></div>{selected.status === "failed" && <button className="secondary" onClick={() => void retryDocument(selected)}>Retry processing</button>}</div>}

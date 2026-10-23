@@ -31,6 +31,8 @@ type Props = {
   emailStatus?: EmailPollStatus | null;
   emailAttentionCount?: number;
   onEmailInbox?: () => void;
+  onPollEmail?: () => void;
+  emailPollBusy?: boolean;
 };
 
 const statuses: DashboardInvoice["status"][] = ["processing", "needs_review", "ready_to_pay", "on_hold", "rejected"];
@@ -39,7 +41,7 @@ const tones: Record<DashboardInvoice["status"], "blue" | "amber" | "green" | "gr
 const classes: Record<DashboardInvoice["status"], string> = { processing: "invoice-status-processing", needs_review: "invoice-status-review", ready_to_pay: "invoice-status-ready", on_hold: "invoice-status-hold", rejected: "invoice-status-rejected" };
 const ringColors: Record<DashboardInvoice["status"], string> = { processing: "#0284c7", needs_review: "#f59e0b", ready_to_pay: "#059669", on_hold: "#64748b", rejected: "#e11d48" };
 
-export function DashboardWorkspace({ invoices, counts, loading, error, search, name, onOpen, onInvoices, onReview, onDocuments, onRefresh, formatMoney, dateLabel, isAdmin, emailStatus, emailAttentionCount = 0, onEmailInbox }: Props) {
+export function DashboardWorkspace({ invoices, counts, loading, error, search, name, onOpen, onInvoices, onReview, onDocuments, onRefresh, formatMoney, dateLabel, isAdmin, emailStatus, emailAttentionCount = 0, onEmailInbox, onPollEmail, emailPollBusy = false }: Props) {
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   const query = search.trim().toLowerCase();
   const attention = invoices.filter(invoice => invoice.status === "needs_review" && (!query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""}`.toLowerCase().includes(query))).slice(0, 5);
@@ -65,7 +67,7 @@ export function DashboardWorkspace({ invoices, counts, loading, error, search, n
   return <div className="dashboard-page">
     <header className="welcome dashboard-welcome dashboard-hero"><div className="dashboard-hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE OVERVIEW</span><h1>{greeting}, {name}</h1><p>{counts.needs_review === 0 ? "Your invoice queue is clear. Keep your documents moving smoothly." : `${counts.needs_review.toLocaleString("en-IN")} ${counts.needs_review === 1 ? "invoice needs" : "invoices need"} your review.`}</p><Button variant="primary" onClick={onReview}>Review invoices <span aria-hidden="true">→</span></Button></div><div className="dashboard-hero-art" aria-hidden="true"><span className="hero-orb orb-one"/><span className="hero-orb orb-two"/><span className="hero-glass-card"><i/><i/><b>{counts.needs_review.toLocaleString("en-IN")}</b><small>NEEDS REVIEW</small></span></div><button className="dashboard-refresh" onClick={onRefresh} disabled={loading} aria-label="Refresh dashboard">↻</button></header>
     {error && <div className="notice error" role="alert">{error}<button onClick={onRefresh}>Try again</button></div>}
-    {isAdmin && <Card className="dashboard-card email-dashboard-card"><div><span className="eyebrow purple">MAILBOX AUTOMATION</span><h2>Email inbox</h2><p className="muted">{emailStatus?.enabled ? `Last poll ${dateLabel(emailStatus.last_run_at) || "has not run yet"}.` : "Email polling is currently disabled."}</p></div><div className="email-dashboard-summary"><span><b>{emailStatus?.counts?.processed || 0}</b><small>processed</small></span><span><b>{emailAttentionCount}</b><small>needs attention</small></span><span><b>{emailStatus?.counts?.failed || 0}</b><small>failed</small></span></div><Button variant="secondary" onClick={onEmailInbox}>Open email inbox <span aria-hidden="true">→</span></Button></Card>}
+    {isAdmin && <Card className="dashboard-card email-dashboard-card"><div className="email-dashboard-heading"><span className="email-dashboard-icon" aria-hidden="true">✉</span><div><span className="eyebrow purple">MAILBOX AUTOMATION</span><h2>Email inbox</h2><p className="muted">{emailStatus?.enabled ? `Last poll ${dateLabel(emailStatus.last_run_at) || "has not run yet"}.` : "Email polling is currently disabled."}</p>{emailStatus?.next_poll_at && <small className="email-next-poll">Next poll {dateLabel(emailStatus.next_poll_at)}</small>}</div></div><div className="email-dashboard-summary"><span><b>{emailStatus?.counts?.processed || 0}</b><small>Ready</small></span><span><b>{emailAttentionCount}</b><small>Needs attention</small></span><span><b>{emailStatus?.counts?.failed || 0}</b><small>Failed</small></span></div><div className="email-dashboard-actions"><Button variant="secondary" onClick={onEmailInbox}>Open inbox <span aria-hidden="true">→</span></Button><Button onClick={onPollEmail} disabled={emailPollBusy}>{emailPollBusy ? "Polling…" : "Poll now"}</Button></div></Card>}
     <section className="kpi-grid" aria-label="Invoice summary">
       <KpiCard label="Total invoices" value={total} tone="accent" icon="▤" onClick={onInvoices}/>
       <KpiCard label="Needs review" value={counts.needs_review} tone="amber" icon="!" onClick={onReview}/>

@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { createAuthSession } from "./authSession";
 import { Badge, Button, Card, Skeleton } from "./components/ui";
+import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceLevel, type ConfidenceResponse } from "./components/CommandCenter";
+import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
+import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import "./styles/globals.css";
 import "./styles/modern.css";
 
@@ -36,11 +39,15 @@ type Doc = {
   id: string; original_filename: string; status: string; doc_type?: string | null;
   created_at?: string | null; updated_at?: string | null; failure_message?: string | null;
   extracted_json?: Record<string, unknown> | null; raw_text?: string | null;
-  source?: string | null; email_sender?: string | null;
+  source?: string | null; email_sender?: string | null; email_subject?: string | null;
+  email_received_at?: string | null; linked_invoice_id?: string | null;
+  linked_invoice_status?: string | null;
 };
-type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number };
-type InvoiceItem = { invoice_id: string; source_document_id?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected" };
+type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
+type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
 type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: { description?: string | null; item_code?: string | null; qty?: number | string | null; unit_price?: number | string | null; amount?: number | string | null }[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[] };
+type EmailMessageItem = { id: string; sender?: string | null; subject?: string | null; status: string; filter_reason?: string | null; failure_reason?: string | null; received_at?: string | null; retryable: boolean; document_id?: string | null; linked_invoice_id?: string | null; linked_invoice_status?: string | null };
+type EmailStatus = { enabled: boolean; last_run_at?: string | null; next_poll_at?: string | null; docling_models_available: boolean; counts?: { processed?: number; failed?: number; needs_attention?: number; skipped_by_reason?: Record<string, number> }; last_result?: Record<string, number | Record<string, number> | string> };
 type MatchCandidate = { match_id: string; po_id: string; po_number: string; vendor_name?: string | null; total_amount?: number | string | null; currency?: string | null; score: number; status: string };
 type AuthProfile = { email: string; role: "admin" | "associate"; must_change_password: boolean; temp_password_expires_at?: string | null; name?: string };
 type Associate = { id: string; name: string; email: string; is_active: boolean; created_at: string };
@@ -72,8 +79,10 @@ function humanize(value?: string | null) {
 const processingStatuses = new Set(["uploaded", "queued", "received", "reading", "parsing", "processing", "classified", "matching"]);
 function friendlyStatus(value?: string | null) {
   const status = (value || "").toLowerCase();
+  if (["needs_data_review", "needs_vendor_review"].includes(status)) return "Needs data review";
+  if (status === "needs_attention") return "Needs attention";
   if (processingStatuses.has(status)) return "Processing";
-  if (["extracted", "parsed", "processed"].includes(status)) return "Ready";
+  if (["ready", "extracted", "parsed", "processed"].includes(status)) return "Ready";
   if (status === "failed") return "Failed";
   return "Processing";
 }
@@ -81,6 +90,7 @@ function isProcessing(value?: string | null) { return processingStatuses.has((va
 function statusClass(value?: string | null) {
   const s = (value || "unknown").toLowerCase();
   if (["failed", "rejected", "overdue", "match_issues", "no_match"].includes(s)) return "danger";
+  if (["needs_data_review", "needs_vendor_review", "needs_attention"].includes(s)) return "warning";
   if (["approved", "paid", "match_approved", "processed", "extracted", "parsed", "ready_to_pay"].includes(s)) return "success";
   if (processingStatuses.has(s) || ["verifying", "resubmitted", "on_hold"].includes(s)) return "pending";
   return "neutral";
@@ -90,9 +100,21 @@ function dateLabel(value?: string | null) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(date);
 }
+function dateTimeLabel(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+function emailPollCount(status: EmailStatus | null, key: string, fallback: string) {
+  const result = status?.last_result || {};
+  const value = result[key] ?? result[fallback];
+  return typeof value === "number" ? value : 0;
+}
 function App() {
-  const [activePage, setActivePage] = useState<"dashboard" | "documents" | "invoices" | "associates">("dashboard");
-  const [globalSearch, setGlobalSearch] = useState("");
+  const [activePage, setActivePage] = useState<"dashboard" | "command-center" | "documents" | "invoices" | "email" | "associates">("dashboard");
+  const { filters: invoiceQuery, update: updateInvoiceQuery } = useInvoiceQueryState();
+  const invoiceSource = (invoiceQuery.source || "all") as "all" | "upload" | "email";
+  const [globalSearch, setGlobalSearch] = useState(invoiceQuery.search || "");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -124,7 +146,8 @@ function App() {
   const [invoiceCounts, setInvoiceCounts] = useState<Record<InvoiceItem["status"], number>>({ processing: 0, needs_review: 0, ready_to_pay: 0, on_hold: 0, rejected: 0 });
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [invoiceError, setInvoiceError] = useState("");
-  const [invoiceStatus, setInvoiceStatus] = useState<InvoiceItem["status"] | "all">("all");
+  const [invoiceTotal, setInvoiceTotal] = useState(0);
+  const setInvoiceSource = (source: "all" | "upload" | "email") => updateInvoiceQuery({ source });
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
   const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string } | null>(null);
@@ -136,6 +159,7 @@ function App() {
   const [docSearch, setDocSearch] = useState("");
   const [docType, setDocType] = useState("all");
   const [docStatus, setDocStatus] = useState("all");
+  const [docSource, setDocSource] = useState<"latest" | "all" | "email">("latest");
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -143,6 +167,31 @@ function App() {
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
+  const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
+  const [emailMessages, setEmailMessages] = useState<EmailMessageItem[]>([]);
+  const [emailTotal, setEmailTotal] = useState(0);
+  const [emailFilter, setEmailFilter] = useState("all");
+  const [emailReasonFilter, setEmailReasonFilter] = useState("");
+  const [emailPage, setEmailPage] = useState(0);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [commandSummary, setCommandSummary] = useState<Partial<Record<CommandBucket, CommandSummary>>>({});
+  const [commandBills, setCommandBills] = useState<CommandBill[]>([]);
+  const [commandTotal, setCommandTotal] = useState(0);
+  const [commandLoading, setCommandLoading] = useState(false);
+  const [commandError, setCommandError] = useState("");
+  const [commandConfidences, setCommandConfidences] = useState<Record<string, ConfidenceLevel>>({});
+  const [filterVendors, setFilterVendors] = useState<FilterVendor[]>([]);
+  const [filterOwners, setFilterOwners] = useState<FilterOwner[]>([]);
+  const [commandAction, setCommandAction] = useState<{ bill: CommandBill; action: string } | null>(null);
+  const [commandActionReason, setCommandActionReason] = useState("");
+  const [commandOwnerId, setCommandOwnerId] = useState("");
+  const [commandPaidDate, setCommandPaidDate] = useState(new Date().toISOString().slice(0, 10));
+  const [commandPaymentMethod, setCommandPaymentMethod] = useState("bank_transfer");
+  const [commandPaymentReference, setCommandPaymentReference] = useState("");
+  const [commandActionBusy, setCommandActionBusy] = useState(false);
+  const notifiedEmailInvoiceIds = useRef<Set<string> | null>(null);
 
   const notify = useCallback((text: string, kind: "success" | "error" | "info" = "info") => {
     setToast({ text, kind });
@@ -151,6 +200,8 @@ function App() {
     authSession.clear(); setToken(""); setProfile(null); setActivePage("dashboard"); setMustChangePassword(false); setProfileLoading(false); setDocuments([]); setSelectedDoc(null); setAssociateCredential(null);
   }, []);
   const authHeaders = useCallback(() => ({ Authorization: `Bearer ${authSession.getAccessToken()}` }), []);
+
+  useEffect(() => { setGlobalSearch(invoiceQuery.search); }, [invoiceQuery.search]);
 
   useEffect(() => {
     let active = true;
@@ -204,11 +255,13 @@ function App() {
       const query = new URLSearchParams({ page: String(nextPage), page_size: "50" });
       if (docStatus !== "all" && !["processing", "ready"].includes(docStatus)) query.set("status", docStatus);
       if (docType !== "all") query.set("doc_type", docType);
+      if (docSource === "email") query.set("source", "email");
+      else if (docSource === "latest") query.set("source", "upload");
       const response = await axios.get<PageResponse<Doc> | Doc[]>(`${CORE_URL}/api/documents?${query}`, { headers: authHeaders() });
       const data = response.data;
       const items = Array.isArray(data) ? data : data.items || [];
-      const visibleItems = recentBatchIds ? items.filter(item => recentBatchIds.includes(item.id)) : items;
-      setDocuments(visibleItems); setDocTotal(recentBatchIds ? visibleItems.length : (Array.isArray(data) ? items.length : data.total ?? items.length));
+      const visibleItems = docSource === "latest" && recentBatchIds.length ? items.filter(item => recentBatchIds.includes(item.id)) : items;
+      setDocuments(visibleItems); setDocTotal(docSource === "latest" && recentBatchIds.length ? visibleItems.length : (Array.isArray(data) ? items.length : data.total ?? items.length));
       setDocPage(Array.isArray(data) ? nextPage : data.page ?? nextPage);
       setSelectedDoc(current => {
         const latest = current && visibleItems.find(item => item.id === current.id);
@@ -218,7 +271,7 @@ function App() {
       const message = getError(error, "Could not load documents."); setDocError(message);
       if (axios.isAxiosError(error) && error.response?.status === 401) { clearSession(); notify("Your session expired. Please sign in again.", "error"); }
     } finally { setDocLoading(false); }
-  }, [token, docPage, docStatus, docType, authHeaders, clearSession, notify, recentBatchIds]);
+  }, [token, docPage, docStatus, docType, docSource, authHeaders, clearSession, notify, recentBatchIds]);
 
   const loadAssociates = useCallback(async () => {
     if (!token || profile?.role !== "admin") return;
@@ -235,24 +288,139 @@ function App() {
     if (!token) return;
     setInvoiceLoading(true); setInvoiceError("");
     try {
+      const makeQuery = (includeStatus: boolean, pageSize: number) => {
+        const query = new URLSearchParams({ page: String(invoiceQuery.page), page_size: String(pageSize) });
+        if (includeStatus && invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) query.set("status", invoiceQuery.status);
+        if (invoiceSource !== "all") query.set("source", invoiceSource);
+        if (invoiceQuery.vendor_id) query.set("vendor_id", invoiceQuery.vendor_id);
+        if (invoiceQuery.due_date_from) query.set("due_date_from", invoiceQuery.due_date_from);
+        if (invoiceQuery.due_date_to) query.set("due_date_to", invoiceQuery.due_date_to);
+        if (invoiceQuery.amount_min) query.set("amount_min", invoiceQuery.amount_min);
+        if (invoiceQuery.amount_max) query.set("amount_max", invoiceQuery.amount_max);
+        if (invoiceQuery.gl_code) query.set("gl_code", invoiceQuery.gl_code);
+        if (invoiceQuery.owner_user_id) query.set("owner_user_id", invoiceQuery.owner_user_id);
+        if (invoiceQuery.sort_by) query.set("sort_by", invoiceQuery.sort_by);
+        if (globalSearch.trim()) query.set("search", globalSearch.trim());
+        return query;
+      };
+      const countQuery = makeQuery(false, 1);
       const [list, ...counts] = await Promise.all([
-        axios.get<PageResponse<InvoiceItem>>(`${CORE_URL}/api/invoices?page=1&page_size=100`, { headers: authHeaders() }),
-        ...invoiceStatuses.map(status => axios.get<PageResponse<InvoiceItem>>(`${CORE_URL}/api/invoices?status=${status}&page=1&page_size=1`, { headers: authHeaders() })),
+        axios.get<PageResponse<InvoiceItem>>(`${CORE_URL}/api/invoices?${makeQuery(true, 25)}`, { headers: authHeaders() }),
+        ...invoiceStatuses.map(status => {
+          const query = new URLSearchParams(countQuery);
+          query.set("status", status);
+          return axios.get<PageResponse<InvoiceItem>>(`${CORE_URL}/api/invoices?${query}`, { headers: authHeaders() });
+        }),
       ]);
-      setInvoices(list.data.items || []);
+      const nextInvoices = list.data.items || [];
+      const nextEmailIds = new Set(nextInvoices.filter(invoice => invoice.source === "email").map(invoice => invoice.invoice_id));
+      if (invoiceSource === "all" && notifiedEmailInvoiceIds.current) {
+        const arrived = nextInvoices.find(invoice => invoice.source === "email" && !notifiedEmailInvoiceIds.current?.has(invoice.invoice_id));
+        if (arrived) notify(`New email invoice received${arrived.vendor_name ? ` from ${arrived.vendor_name}` : ""}.`, "info");
+      }
+      if (invoiceSource === "all") notifiedEmailInvoiceIds.current = nextEmailIds;
+      setInvoices(nextInvoices);
+      setInvoiceTotal(list.data.total || 0);
       setInvoiceCounts(Object.fromEntries(invoiceStatuses.map((status, index) => [status, counts[index].data.total || 0])) as Record<InvoiceItem["status"], number>);
     } catch (error) { setInvoiceError(getError(error, "Could not load invoices.")); }
     finally { setInvoiceLoading(false); }
-  }, [token, authHeaders]);
+  }, [token, authHeaders, invoiceSource, invoiceQuery, globalSearch, notify]);
 
-  useEffect(() => { if (token && !profileLoading && !mustChangePassword) void loadDocuments(1); }, [token, profileLoading, mustChangePassword, docStatus, docType]);
+  const loadCommandCenter = useCallback(async () => {
+    if (!token) return;
+    setCommandLoading(true); setCommandError("");
+    try {
+      const bucket = (invoiceQuery.bucket || "ready_to_pay") as CommandBucket;
+      const query = new URLSearchParams({ bucket, page: String(invoiceQuery.page), page_size: "25" });
+      const sortBy = bucket === "overdue" && invoiceQuery.sort_by === "date_received" ? "days_overdue" : invoiceQuery.sort_by;
+      query.set("sort_by", sortBy);
+      if (invoiceQuery.status) query.set("workflow_status", invoiceQuery.status);
+      if (invoiceQuery.vendor_id) query.set("vendor_id", invoiceQuery.vendor_id);
+      if (invoiceQuery.due_date_from) query.set("due_date_from", invoiceQuery.due_date_from);
+      if (invoiceQuery.due_date_to) query.set("due_date_to", invoiceQuery.due_date_to);
+      if (invoiceQuery.amount_min) query.set("amount_min", invoiceQuery.amount_min);
+      if (invoiceQuery.amount_max) query.set("amount_max", invoiceQuery.amount_max);
+      if (invoiceQuery.gl_code) query.set("gl_code", invoiceQuery.gl_code);
+      if (invoiceQuery.owner_user_id) query.set("owner_user_id", invoiceQuery.owner_user_id);
+      const [summaryResponse, listResponse] = await Promise.all([
+        axios.get<{ buckets: Record<string, CommandSummary> }>(`${CORE_URL}/api/command-center/summary`, { headers: authHeaders() }),
+        axios.get<{ items: CommandBill[]; total: number; page: number; page_size: number }>(`${CORE_URL}/api/command-center/bills?${query}`, { headers: authHeaders() }),
+      ]);
+      const allBuckets = summaryResponse.data.buckets || {};
+      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
+      const items = listResponse.data.items || [];
+      setCommandBills(items);
+      setCommandTotal(listResponse.data.total || 0);
+      const verified = await Promise.allSettled(items.map(bill => axios.get<ConfidenceResponse>(`${CORE_URL}/api/invoices/${bill.invoice_id}/verification`, { headers: authHeaders() })));
+      const nextConfidence: Record<string, ConfidenceLevel> = {};
+      verified.forEach((result, index) => { if (result.status === "fulfilled") nextConfidence[items[index].invoice_id] = confidenceLevel(result.value.data); });
+      setCommandConfidences(nextConfidence);
+    } catch (error) {
+      const message = axios.isAxiosError(error) && error.response?.status === 403 ? "You do not have permission to view the Command Center." : getError(error, "Could not load the Command Center.");
+      setCommandError(message);
+    } finally { setCommandLoading(false); }
+  }, [token, authHeaders, invoiceQuery]);
+
+  const vendorSearchTimer = useRef<number | undefined>(undefined);
+  const searchFilterVendors = useCallback((search: string) => {
+    if (vendorSearchTimer.current) window.clearTimeout(vendorSearchTimer.current);
+    if (search.trim().length < 2) return;
+    vendorSearchTimer.current = window.setTimeout(() => {
+      const query = new URLSearchParams({ search: search.trim(), page: "1", page_size: "100" });
+      void axios.get<FilterVendor[]>(`${CORE_URL}/api/vendors?${query}`, { headers: authHeaders() })
+        .then(response => setFilterVendors(response.data.map(vendor => ({ id: vendor.id, name: vendor.name }))))
+        .catch(() => undefined);
+    }, 250);
+  }, [authHeaders]);
+
   useEffect(() => {
-    if (!token || profileLoading || mustChangePassword || !documents.some(doc => isProcessing(doc.status))) return;
-    const timer = window.setInterval(() => { void loadDocuments(docPage); }, 5000);
+    if (!token || profileLoading || mustChangePassword) return;
+    void Promise.all([
+      axios.get<{ items: FilterOwner[] }>(`${CORE_URL}/api/users/assignable`, { headers: authHeaders() }),
+      axios.get<FilterVendor[]>(`${CORE_URL}/api/vendors?page=1&page_size=100`, { headers: authHeaders() }),
+    ]).then(([usersResponse, vendorsResponse]) => {
+      setFilterOwners(usersResponse.data.items || []);
+      setFilterVendors(vendorsResponse.data.map(vendor => ({ id: vendor.id, name: vendor.name })));
+    }).catch(() => undefined);
+  }, [token, profileLoading, mustChangePassword, authHeaders]);
+
+  const loadEmailInbox = useCallback(async () => {
+    if (!token) return;
+    setEmailLoading(true); setEmailError("");
+    try {
+      const query = new URLSearchParams({ limit: "25", offset: String(emailPage * 25) });
+      if (emailFilter !== "all") query.set("status", emailFilter);
+      if (emailReasonFilter.trim()) query.set("reason", emailReasonFilter.trim());
+      const [status, messages] = await Promise.all([
+        axios.get<EmailStatus>(`${CORE_URL}/api/email/status`, { headers: authHeaders() }),
+        axios.get<PageResponse<EmailMessageItem>>(`${CORE_URL}/api/email/messages?${query}`, { headers: authHeaders() }),
+      ]);
+      setEmailStatus(status.data); setEmailMessages(messages.data.items || []); setEmailTotal(messages.data.total || 0);
+    } catch (error) { setEmailError(getError(error, "Could not load the email inbox.")); }
+    finally { setEmailLoading(false); }
+  }, [token, authHeaders, emailPage, emailFilter, emailReasonFilter]);
+
+  useEffect(() => { if (token && !profileLoading && !mustChangePassword) void loadDocuments(1); }, [token, profileLoading, mustChangePassword, docStatus, docType, docSource]);
+  useEffect(() => {
+    if (!token || profileLoading || mustChangePassword) return;
+    const running = documents.some(doc => isProcessing(doc.status))
+      || invoices.some(invoice => invoice.status === "processing")
+      || emailMessages.some(message => ["processing", "received", "failed"].includes(message.status));
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      void loadDocuments(docPage); void loadInvoices(); void loadEmailInbox();
+    }, 15000);
     return () => window.clearInterval(timer);
-  }, [token, profileLoading, mustChangePassword, documents, docPage, loadDocuments]);
+  }, [token, profileLoading, mustChangePassword, documents, invoices, emailMessages, docPage, loadDocuments, loadInvoices, loadEmailInbox]);
   useEffect(() => { if (activePage === "associates") void loadAssociates(); }, [activePage, loadAssociates]);
-  useEffect(() => { if (token && !profileLoading && !mustChangePassword) void loadInvoices(); }, [token, profileLoading, mustChangePassword, loadInvoices]);
+  useEffect(() => { if ((activePage === "invoices" || activePage === "dashboard") && token && !profileLoading && !mustChangePassword) void loadInvoices(); }, [activePage, token, profileLoading, mustChangePassword, loadInvoices]);
+  useEffect(() => { if (activePage === "command-center" && token && !profileLoading && !mustChangePassword) void loadCommandCenter(); }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
+  useEffect(() => {
+    if (activePage !== "command-center" || !token || profileLoading || mustChangePassword) return;
+    const timer = window.setInterval(() => { void loadCommandCenter(); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
+  useEffect(() => { if (token && !profileLoading && !mustChangePassword && ["email", "dashboard"].includes(activePage)) void loadEmailInbox(); }, [token, profileLoading, mustChangePassword, activePage, loadEmailInbox]);
 
   async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setAuthBusy(true); setToast(null); setLoginError("");
@@ -429,6 +597,66 @@ function App() {
     } catch (error) { notify(getError(error, "Could not retry document processing."), "error"); }
     finally { setDetailLoading(false); }
   }
+  async function pollEmailNow() {
+    setEmailBusy(true);
+    try {
+      const response = await axios.post<Record<string, unknown>>(`${CORE_URL}/api/email/poll`, {}, { headers: authHeaders() });
+      const summary = response.data;
+      notify(`Email poll complete. ${Number(summary.new_documents || 0)} new documents, ${Number(summary.failed || 0)} failed.`, Number(summary.failed || 0) ? "error" : "success");
+      await Promise.all([loadEmailInbox(), loadDocuments(1), loadInvoices()]);
+    } catch (error) { notify(getError(error, "Could not poll the email inbox."), "error"); }
+    finally { setEmailBusy(false); }
+  }
+  async function retryEmailMessage(message: EmailMessageItem) {
+    setEmailBusy(true);
+    try {
+      await axios.post(`${CORE_URL}/api/email/messages/${message.id}/retry`, {}, { headers: authHeaders() });
+      notify("Email retry queued.", "success"); await loadEmailInbox();
+    } catch (error) { notify(getError(error, "Could not retry this email."), "error"); }
+    finally { setEmailBusy(false); }
+  }
+
+  async function submitCommandAction() {
+    if (!commandAction) return;
+    const { bill, action } = commandAction;
+    const base = `${CORE_URL}/api/invoices/${bill.invoice_id}`;
+    let endpoint = "";
+    let body: Record<string, unknown> = {};
+    if (action === "approve") endpoint = "approve";
+    else if (action === "reject" || action === "hold" || action === "escalate") {
+      if (commandActionReason.trim().length < 3) { notify("Enter a reason with at least 3 characters.", "error"); return; }
+      endpoint = action;
+      body = { reason: commandActionReason.trim() };
+    } else if (action === "reassign") {
+      if (commandActionReason.trim().length < 3) { notify("Enter a reason with at least 3 characters.", "error"); return; }
+      if (!commandOwnerId) { notify("Choose an active associate.", "error"); return; }
+      endpoint = action;
+      body = { reason: commandActionReason.trim(), owner_user_id: commandOwnerId };
+    } else if (action === "pay") {
+      if (!commandPaidDate || !commandPaymentReference.trim()) { notify("Enter the payment date and reference.", "error"); return; }
+      endpoint = action;
+      body = { paid_date: commandPaidDate, method: commandPaymentMethod, reference: commandPaymentReference.trim() };
+    } else if (action === "resubmit") endpoint = "resubmit";
+    else { notify("This action is not available yet.", "info"); return; }
+
+    setCommandActionBusy(true);
+    try {
+      await axios.post(`${base}/${endpoint}`, body, { headers: authHeaders() });
+      notify(`${humanize(action)} completed.`, "success");
+      setCommandAction(null);
+      await Promise.all([loadCommandCenter(), loadInvoices()]);
+    } catch (error) {
+      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined;
+      const detailRecord = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
+      const serverMessage = typeof detail === "string" ? detail : typeof detailRecord?.message === "string" ? detailRecord.message : typeof detailRecord?.detail === "string" ? detailRecord.detail : undefined;
+      const message = axios.isAxiosError(error) && error.response?.status === 403
+        ? `You do not have permission to perform this action.${typeof serverMessage === "string" ? ` ${serverMessage}` : ""}`
+        : typeof serverMessage === "string" ? serverMessage
+          : axios.isAxiosError(error) && error.response ? `Could not ${action} this invoice. (HTTP ${error.response.status})`
+            : getError(error, `Could not ${action} this invoice.`);
+      notify(message, "error");
+    } finally { setCommandActionBusy(false); }
+  }
 
   const filteredDocs = useMemo(() => documents.filter(doc => {
     const q = `${docSearch} ${globalSearch}`.trim().toLowerCase();
@@ -438,7 +666,7 @@ function App() {
     const matchesStatus = docStatus === "all" || (docStatus === "processing" ? isProcessing(doc.status) : docStatus === "ready" ? ["parsed", "extracted", "processed"].includes(doc.status.toLowerCase()) : doc.status === docStatus);
     return matchesSearch && matchesType && matchesStatus;
   }), [documents, docSearch, globalSearch, docType, docStatus]);
-  const docCounts = useMemo(() => ({ processing: documents.filter(d => ["received", "reading", "parsing", "parsed", "classified", "matching"].includes(d.status)).length, completed: documents.filter(d => ["extracted", "processed", "match_approved", "approved"].includes(d.status)).length, attention: documents.filter(d => ["failed", "needs_vendor_review", "incomplete", "match_issues"].includes(d.status)).length }), [documents]);
+  const docCounts = useMemo(() => ({ processing: documents.filter(d => ["received", "reading", "parsing", "parsed", "classified", "matching"].includes(d.status)).length, completed: documents.filter(d => ["extracted", "processed", "match_approved", "approved"].includes(d.status)).length, attention: documents.filter(d => ["failed", "needs_data_review", "needs_vendor_review", "incomplete", "match_issues"].includes(d.status)).length }), [documents]);
 
   if (restoring && !token) return <main className="session-screen"><Loader title="Restoring secure session" subtitle="Checking your sign-in session…" /></main>;
   if (!token) return <main className="auth-shell page-enter">
@@ -460,15 +688,17 @@ function App() {
       <p className="side-label">WORKSPACE</p>
       <nav className="primary-nav" aria-label="Main navigation">
         <button className={activePage === "dashboard" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("dashboard"); setMobileNavOpen(false); }}><span className="nav-icon">▦</span><span>Dashboard</span></button>
+        <button className={activePage === "command-center" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("command-center"); setMobileNavOpen(false); if (activePage !== "command-center") updateInvoiceQuery({ status: "" }); }}><span className="nav-icon">▤</span><span>Command Center</span></button>
         <button className={activePage === "documents" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("documents"); setMobileNavOpen(false); }}><span className="nav-icon">▤</span><span>Documents</span><b>{docTotal}</b></button>
-        <button className={activePage === "invoices" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("invoices"); setMobileNavOpen(false); }}><span className="nav-icon">＄</span><span>Invoices</span><b>{Object.values(invoiceCounts).reduce((sum, count) => sum + count, 0)}</b></button>
+        <button className={activePage === "invoices" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("invoices"); setMobileNavOpen(false); if (activePage !== "invoices" && invoiceQuery.status && !invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) updateInvoiceQuery({ status: "" }); }}><span className="nav-icon">＄</span><span>Invoices</span><b>{Object.values(invoiceCounts).reduce((sum, count) => sum + count, 0)}</b></button>
+        <button className={activePage === "email" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("email"); setMobileNavOpen(false); }}><span className="nav-icon">✉</span><span>Email inbox</span><b>{emailStatus?.counts?.needs_attention || 0}</b></button>
         {profile?.role === "admin" && <button className={activePage === "associates" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("associates"); setMobileNavOpen(false); }}><span className="nav-icon">♙</span><span>Associates</span></button>}
       </nav>
       <div className="sidebar-bottom"><div className="profile"><span className="avatar">{(email[0] || "U").toUpperCase()}</span><div><b>{profile?.name || email || "Workspace user"}</b><small>{email}</small></div></div><button className="signout" onClick={() => void logout()} disabled={authBusy}>↪ <span>Sign out</span></button></div>
     </aside>
-    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}>☰</button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "invoices" ? "Invoices" : activePage === "documents" ? "Documents" : "Dashboard"}</b></div><label className="topbar-search"><span aria-hidden="true">⌕</span><input value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label><button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><span aria-hidden="true">⌄</span></button></header>
+    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}>☰</button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && <label className="topbar-search"><span aria-hidden="true">⌕</span><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><span aria-hidden="true">⌄</span></button></header>
       <div className="content">
-      {activePage === "invoices" ? <InvoicesWorkspace invoices={invoices} counts={invoiceCounts} status={invoiceStatus} onStatus={setInvoiceStatus} loading={invoiceLoading} error={invoiceError} onRefresh={() => void loadInvoices()} search={globalSearch} onOpen={invoice => void openInvoice(invoice.invoice_id)} /> : activePage === "associates" && profile?.role === "admin" ? <>
+      {activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
         <section className="panel admin-associate-panel">
           <div className="panel-head"><div><span className="eyebrow purple">ADMINISTRATION</span><h2>Add an associate</h2><p className="muted">Temporary password is valid for 24 hours. The associate must change it at first sign in.</p></div></div>
           <form className="toolbar" onSubmit={createAssociate}>
@@ -484,7 +714,7 @@ function App() {
           {associatesError && <div className="notice error">{associatesError}<button onClick={() => void loadAssociates()}>Try again</button></div>}
           {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts…"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
-      </> : activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
+      </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "date_received" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
         <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={uploadFiles} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
           <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents… {uploadProgress}%</span></div>
@@ -494,21 +724,23 @@ function App() {
           <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><span className="count">{docTotal} files</span></div>
           <div className="toolbar simple-toolbar">
             <label className="search"><span>⌕</span><input value={docSearch} onChange={e => setDocSearch(e.target.value)} placeholder="Search documents…" /></label>
+            <select value={docSource} onChange={e => { setDocPage(1); setDocSource(e.target.value as "latest" | "all" | "email"); }} aria-label="Filter documents by source"><option value="latest">Latest upload</option><option value="email">Email</option><option value="all">All</option></select>
             <select value={docType} onChange={e => { setDocPage(1); setDocType(e.target.value); }} aria-label="Filter by document type"><option value="all">All types</option><option value="invoice">Invoices</option><option value="po">Purchase orders</option><option value="goods_receipt">Goods receipts</option><option value="other">Other</option></select>
             <select value={docStatus} onChange={e => { setDocPage(1); setDocStatus(e.target.value); }} aria-label="Filter by document status"><option value="all">All statuses</option><option value="processing">Processing</option><option value="ready">Ready</option><option value="failed">Failed</option><option value="ignored">Ignored</option></select>
             <button className="icon-button" onClick={() => void loadDocuments(docPage)} disabled={docLoading} aria-label="Refresh documents">↻</button>
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
           {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads…"/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => <button type="button" className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)}>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
               <div className="document-card-top"><span className="file-badge">{(doc.original_filename.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}</span><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span></div>
               <div className="document-card-icon">▤</div>
               <strong title={doc.original_filename}>{doc.original_filename}</strong>
               <span className="document-card-type">{humanize(doc.doc_type || (doc.extracted_json?.document_type as string | undefined) || "Document")}</span>
-              {(doc.doc_type === "invoice" || doc.extracted_json?.document_type === "invoice") && doc.extracted_json && <span className="document-invoice-link" role="link" tabIndex={0} onClick={event => { event.stopPropagation(); setActivePage("invoices"); }} onKeyDown={event => { if (event.key === "Enter") { event.stopPropagation(); setActivePage("invoices"); } }}>View in Invoices →</span>}
+              <span className="document-source-badge">{doc.source === "email" ? "Email" : "Upload"}</span>
+              {doc.linked_invoice_id ? <button type="button" className="text-link document-card-invoice" onClick={event => { event.stopPropagation(); const invoice = invoices.find(item => item.invoice_id === doc.linked_invoice_id); if (invoice) void openInvoice(invoice.invoice_id); else setActivePage("invoices"); }}>View invoice · {doc.linked_invoice_status ? invoiceStatusLabels[doc.linked_invoice_status as InvoiceItem["status"]] || humanize(doc.linked_invoice_status) : "Linked"}</button> : <span className="document-card-reason">{doc.failure_message || "Invoice not created yet"}</span>}
               <span className="document-card-date">Uploaded {dateLabel(doc.created_at)}</span>
               <span className="document-card-preview">Preview details ↗</span>
-            </button>)}</div>
+            </article>)}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
           </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "No documents uploaded yet"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
         </section>
@@ -520,7 +752,7 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}>×</button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}>×</button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}>↗ Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}>↻ Retry processing</button>}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}>↗ Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}>↻ Retry processing</button>}</div></div>}
     </section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
@@ -533,7 +765,7 @@ function App() {
         />
       </div>
     )}
-    {decision && <div className="modal-backdrop reason-backdrop" role="presentation"><form className="modal reason-modal" onSubmit={submitInvoiceDecision}><header className="modal-head"><div><span className="eyebrow purple">REVIEW DECISION</span><h2>{decision.action === "hold" ? "Place invoice on hold" : decision.action === "reject" ? "Reject invoice" : "Approve with exception"}</h2></div><button className="modal-close" type="button" onClick={() => setDecision(null)} aria-label="Cancel">×</button></header><div className="modal-body"><label className="form-label">Reason<textarea value={decision.reason} onChange={event => setDecision({ ...decision, reason: event.target.value })} required minLength={3} maxLength={1000} rows={4} placeholder="Explain this decision" /></label><div className="modal-actions"><button className="secondary" type="button" onClick={() => setDecision(null)}>Cancel</button><button className="primary" type="submit">Save decision</button></div></div></form></div>}
+    {commandAction && <div className="modal-backdrop command-action-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !commandActionBusy) setCommandAction(null); }}><form className="modal command-action-modal" role="dialog" aria-modal="true" aria-labelledby="command-action-title" onSubmit={event => { event.preventDefault(); void submitCommandAction(); }}><header className="modal-head"><div><span className="eyebrow">INVOICE ACTION</span><h2 id="command-action-title">{humanize(commandAction.action)} invoice</h2></div><button className="modal-close" type="button" onClick={() => setCommandAction(null)} disabled={commandActionBusy} aria-label="Cancel">×</button></header><div className="modal-body"><p>Confirm {humanize(commandAction.action).toLowerCase()} for <strong>{commandAction.bill.vendor_name || "Unknown vendor"}</strong> · <strong>{formatInvoiceMoney(commandAction.bill.total_amount, commandAction.bill.currency)}</strong>?</p>{commandAction.action === "pay" && <><label className="form-label">Payment date<input type="date" value={commandPaidDate} onChange={event => setCommandPaidDate(event.target.value)} required/></label><label className="form-label">Payment method<select value={commandPaymentMethod} onChange={event => setCommandPaymentMethod(event.target.value)}><option value="bank_transfer">Bank transfer</option><option value="cheque">Cheque</option><option value="upi">UPI</option><option value="cash">Cash</option><option value="other">Other</option></select></label><label className="form-label">Payment reference<input value={commandPaymentReference} onChange={event => setCommandPaymentReference(event.target.value)} required maxLength={200}/></label></>}{["reject", "hold", "escalate", "reassign"].includes(commandAction.action) && <label className="form-label">Reason<textarea value={commandActionReason} onChange={event => setCommandActionReason(event.target.value)} required minLength={3} maxLength={1000} rows={4} placeholder="Enter a reason"/></label>}{commandAction.action === "reassign" && <label className="form-label">Assign to<select value={commandOwnerId} onChange={event => setCommandOwnerId(event.target.value)} required><option value="">Choose an associate</option>{filterOwners.map(owner => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>}<div className="modal-actions"><Button type="button" variant="secondary" onClick={() => setCommandAction(null)} disabled={commandActionBusy}>Cancel</Button><Button type="submit" variant={commandAction.action === "reject" ? "danger" : "primary"} disabled={commandActionBusy}>{commandActionBusy ? "Saving…" : `Confirm ${humanize(commandAction.action).toLowerCase()}`}</Button></div></div></form></div>}{decision && <div className="modal-backdrop reason-backdrop" role="presentation"><form className="modal reason-modal" onSubmit={submitInvoiceDecision}><header className="modal-head"><div><span className="eyebrow purple">REVIEW DECISION</span><h2>{decision.action === "hold" ? "Place invoice on hold" : decision.action === "reject" ? "Reject invoice" : "Approve with exception"}</h2></div><button className="modal-close" type="button" onClick={() => setDecision(null)} aria-label="Cancel">×</button></header><div className="modal-body"><label className="form-label">Reason<textarea value={decision.reason} onChange={event => setDecision({ ...decision, reason: event.target.value })} required minLength={3} maxLength={1000} rows={4} placeholder="Explain this decision" /></label><div className="modal-actions"><button className="secondary" type="button" onClick={() => setDecision(null)}>Cancel</button><button className="primary" type="submit">Save decision</button></div></div></form></div>}
     {uploadResult && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setUploadResult(null); }}><section className="modal results-modal" role="dialog" aria-modal="true" aria-labelledby="upload-result-title"><header className="modal-head"><div><span className="eyebrow purple">UPLOAD SUMMARY</span><h2 id="upload-result-title">{uploadResult.successes} of {uploadResult.total} files uploaded</h2><p className="muted">Each result below comes from the upload request.</p></div><button className="modal-close" onClick={() => setUploadResult(null)} aria-label="Close upload summary">×</button></header><div className="modal-body"><div className="outcome-list">{uploadResult.outcomes.map((outcome, index) => <div className="outcome-row" key={`${outcome.name}-${index}`}><span className={`outcome-icon ${outcome.ok ? "ok" : "bad"}`}>{outcome.ok ? "✓" : "!"}</span><div><b>{outcome.name}</b><small>{outcome.message}</small></div></div>)}</div><div className="modal-actions"><button className="secondary" onClick={() => setUploadResult(null)}>Close</button><button className="primary" onClick={() => setUploadResult(null)}>View documents</button></div></div></section></div>}
   </div>;
 }
@@ -626,24 +858,77 @@ const invoiceStatuses: InvoiceItem["status"][] = ["processing", "needs_review", 
 const invoiceStatusLabels: Record<InvoiceItem["status"], string> = { processing: "In progress", needs_review: "Needs review", ready_to_pay: "Ready to pay", on_hold: "On hold", rejected: "Rejected" };
 function invoiceStatusClass(status: InvoiceItem["status"]) { return ({ processing: "invoice-status-processing", needs_review: "invoice-status-review", ready_to_pay: "invoice-status-ready", on_hold: "invoice-status-hold", rejected: "invoice-status-rejected" })[status]; }
 function invoiceStatusTone(status: InvoiceItem["status"]): "blue" | "amber" | "green" | "gray" | "red" { return ({ processing: "blue", needs_review: "amber", ready_to_pay: "green", on_hold: "gray", rejected: "red" } as const)[status]; }
-function InvoicesWorkspace({ invoices, counts, status, onStatus, loading, error, search, onRefresh, onOpen }: { invoices: InvoiceItem[]; counts: Record<InvoiceItem["status"], number>; status: InvoiceItem["status"] | "all"; onStatus: (status: InvoiceItem["status"] | "all") => void; loading: boolean; error: string; search: string; onRefresh: () => void; onOpen: (invoice: InvoiceItem) => void }) {
+function InvoicesWorkspace({ invoices, counts, status, onStatus, source, onSource, loading, error, search, onRefresh, onOpen, onOpenDocument }: { invoices: InvoiceItem[]; counts: Record<InvoiceItem["status"], number>; status: InvoiceItem["status"] | "all"; onStatus: (status: InvoiceItem["status"] | "all") => void; source: "all" | "upload" | "email"; onSource: (source: "all" | "upload" | "email") => void; loading: boolean; error: string; search: string; onRefresh: () => void; onOpen: (invoice: InvoiceItem) => void; onOpenDocument: (id: string) => void }) {
   const statusFiltered = status === "all" ? invoices : invoices.filter(invoice => invoice.status === status);
   const query = search.trim().toLowerCase();
-  const visible = statusFiltered.filter(invoice => !query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""} ${invoice.status}`.toLowerCase().includes(query));
+  const visible = statusFiltered.filter(invoice => (source === "all" || invoice.source === source) && (!query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""} ${invoice.status} ${invoice.email_sender || ""} ${invoice.email_subject || ""}`.toLowerCase().includes(query)));
   return <><header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Invoices</h1><p className="muted">Review invoice details and resolve purchase order discrepancies.</p></div><Button variant="secondary" onClick={onRefresh} disabled={loading}>↻ Refresh</Button></header>
     <Card className="panel invoice-workspace"><div className="invoice-status-tabs" role="tablist" aria-label="Invoice status"><button className={status === "all" ? "active" : ""} onClick={() => onStatus("all")}>All <b>{Object.values(counts).reduce((sum, count) => sum + count, 0)}</b></button>{invoiceStatuses.map(item => <button key={item} className={status === item ? "active" : ""} onClick={() => onStatus(item)}><span className={`status-dot ${invoiceStatusClass(item)}`}/>{invoiceStatusLabels[item]} <b>{counts[item]}</b></button>)}</div>
+      <div className="email-filter-row"><label className="form-label">Source<select value={source} onChange={event => onSource(event.target.value as "all" | "upload" | "email")}><option value="all">All sources</option><option value="upload">Upload</option><option value="email">Email</option></select></label></div>
       {error && <div className="notice error">{error}<button onClick={onRefresh}>Try again</button></div>}
-      {loading ? <LoadingPanel title="Loading invoices" subtitle="Retrieving invoice review status…"/> : visible.length ? <div className="table-wrap"><table className="invoice-table"><thead><tr><th>Vendor</th><th>Invoice No</th><th>Invoice Date</th><th>Due Date</th><th className="amount-cell">Total</th><th>Status</th></tr></thead><tbody>{visible.map(invoice => <tr key={invoice.invoice_id} onClick={() => onOpen(invoice)} tabIndex={0} onKeyDown={event => { if (event.key === "Enter") onOpen(invoice); }}><td>{invoice.vendor_name || ""}</td><td>{invoice.invoice_no || ""}</td><td>{invoice.invoice_date ? dateLabel(invoice.invoice_date) : ""}</td><td>{invoice.due_date ? dateLabel(invoice.due_date) : ""}</td><td className="amount-cell">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</td><td><Badge tone={invoiceStatusTone(invoice.status)} dot>{invoiceStatusLabels[invoice.status]}</Badge></td></tr>)}</tbody></table></div> : <EmptyState title="No invoices in this status" description="Uploaded invoices will appear here after extraction."/>}
+      {loading ? <LoadingPanel title="Loading invoices" subtitle="Retrieving invoice review status…"/> : visible.length ? <div className="table-wrap"><table className="invoice-table"><thead><tr><th>Vendor</th><th>Invoice No</th><th>Source</th><th>Sender / subject</th><th>Invoice Date</th><th>Due Date</th><th className="amount-cell">Total</th><th>Status</th><th>Source file</th></tr></thead><tbody>{visible.map(invoice => <tr key={invoice.invoice_id} onClick={() => onOpen(invoice)} tabIndex={0} onKeyDown={event => { if (event.key === "Enter") onOpen(invoice); }}><td>{invoice.vendor_name || ""}</td><td>{invoice.invoice_no || ""}</td><td><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></td><td className="invoice-source-cell">{invoice.source === "email" ? <><span>{invoice.email_sender || "Unknown sender"}</span><small>{invoice.email_subject || "No subject"}</small></> : "—"}</td><td>{invoice.invoice_date ? dateLabel(invoice.invoice_date) : ""}</td><td>{invoice.due_date ? dateLabel(invoice.due_date) : ""}</td><td className="amount-cell">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</td><td><Badge tone={invoiceStatusTone(invoice.status)} dot>{invoiceStatusLabels[invoice.status]}</Badge></td><td>{invoice.source_document_id && <button className="text-link" onClick={event => { event.stopPropagation(); onOpenDocument(invoice.source_document_id!); }}>View document</button>}</td></tr>)}</tbody></table></div> : <EmptyState title="No invoices in this status" description="Invoices received by upload or email will appear here after extraction."/>}
     </Card>
   </>;
 }
 
-function DashboardWorkspace({ invoices, counts, loading, error, search, onOpen, onInvoices, onDocuments, onRefresh }: {
+function emailOutcome(status?: string) {
+  if (status === "processed") return "Processed";
+  if (status === "ignored") return "Skipped";
+  if (status === "needs_attention") return "Needs attention";
+  if (status === "failed" || status === "failed_final") return "Failed";
+  if (status === "processing" || status === "received") return "Processing";
+  return humanize(status);
+}
+function EmailInboxWorkspace({ status, messages, total, filter, onFilter, reason, onReason, page, loading, busy, error, onPoll, onRetry, onRefresh, onPage, onOpenDocument, onOpenInvoice }: {
+  status: EmailStatus | null;
+  messages: EmailMessageItem[];
+  total: number;
+  filter: string;
+  onFilter: (value: string) => void;
+  reason: string;
+  onReason: (value: string) => void;
+  page: number;
+  loading: boolean;
+  busy: boolean;
+  error: string;
+  onPoll: () => void;
+  onRetry: (message: EmailMessageItem) => void;
+  onRefresh: () => void;
+  onPage: (value: number) => void;
+  onOpenDocument: (id: string) => void;
+  onOpenInvoice: (id: string) => void;
+}) {
+  const last = status?.last_result || {};
+  return <div className="email-inbox-page page-enter">
+    <header className="welcome"><div><span className="eyebrow purple">MAIL INTAKE</span><h1>Email inbox</h1><p className="muted">Vendor emails and their invoice attachments.</p></div><div className="toolbar"><Button variant="secondary" onClick={onRefresh} disabled={loading}>Refresh</Button><Button variant="primary" onClick={onPoll} disabled={busy || !status?.enabled}>{busy ? "Polling…" : "Poll now"}</Button></div></header>
+    <section className="email-inbox-status" aria-label="Email polling status">
+      <Card><small>Last poll</small><b>{status?.last_run_at ? dateTimeLabel(status.last_run_at) : "Not polled yet"}</b><span>{status?.enabled ? "Polling enabled" : "Polling disabled"}</span></Card>
+      <Card><small>Next poll</small><b>{status?.next_poll_at ? dateTimeLabel(status.next_poll_at) : "—"}</b></Card>
+      <Card><small>Fetched</small><b>{emailPollCount(status, "mails_found", "emails")}</b></Card>
+      <Card><small>Skipped</small><b>{emailPollCount(status, "skipped", "filtered")}</b></Card>
+      <Card><small>Processed</small><b>{emailPollCount(status, "new_documents", "documents_created")}</b></Card>
+      <Card><small>Failed</small><b>{status?.counts?.failed || 0}</b></Card>
+    </section>
+    {status && !status.docling_models_available && <div className="notice error" role="status"><b>OCR models unavailable.</b> Ask an admin to run the model download.</div>}
+    {error && <div className="notice error" role="alert">{error}<button onClick={onRefresh}>Try again</button></div>}
+    <Card className="panel email-message-panel">
+      <div className="email-filter-row"><label className="form-label">Outcome<select value={filter} onChange={event => onFilter(event.target.value)}><option value="all">All</option><option value="processed">Processed</option><option value="skipped">Skipped</option><option value="failed">Failed</option><option value="needs_attention">Needs attention</option></select></label><label className="form-label">Reason<input value={reason} onChange={event => onReason(event.target.value)} placeholder="Filter by reason" /></label></div>
+      {loading ? <LoadingPanel title="Loading email messages" subtitle="Syncing the inbox status…"/> : messages.length ? <div className="table-wrap"><table className="email-message-table"><thead><tr><th>Sender</th><th>Subject</th><th>Received</th><th>Outcome</th><th>Reason</th><th>Invoice</th><th>Action</th></tr></thead><tbody>{messages.map(message => <tr key={message.id} className={message.status === "needs_attention" || message.status.startsWith("failed") ? "email-action-row" : ""}><td>{message.sender || "Unknown sender"}</td><td>{message.subject || "No subject"}</td><td>{dateTimeLabel(message.received_at)}</td><td><Badge tone={message.status === "processed" ? "green" : message.status.startsWith("failed") ? "red" : message.status === "needs_attention" ? "amber" : "gray"} dot>{emailOutcome(message.status)}</Badge></td><td>{message.failure_reason || message.filter_reason || "—"}</td><td>{message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenInvoice(message.linked_invoice_id!)}>{message.linked_invoice_status ? humanize(message.linked_invoice_status) : "View invoice"}</button> : message.document_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>View document</button> : "—"}</td><td>{message.retryable ? <Button variant="secondary" disabled={busy} onClick={() => onRetry(message)}>Retry</Button> : message.document_id && !message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>Open source</button> : "—"}</td></tr>)}</tbody></table></div> : <EmptyState title="No email messages found" description={filter !== "all" || reason ? "Change your filters to view more messages." : "Email messages will appear here after polling begins."} action={filter !== "all" || reason ? <Button variant="secondary" onClick={() => { onFilter("all"); onReason(""); }}>Clear filters</Button> : null}/>}
+      {total > 25 && <div className="pagination"><span>{total} messages</span><div><Button variant="secondary" disabled={loading || page === 0} onClick={() => onPage(page - 1)}>Previous</Button><Button variant="secondary" disabled={loading || (page + 1) * 25 >= total} onClick={() => onPage(page + 1)}>Next</Button></div></div>}
+    </Card>
+    <p className="muted email-model-note">Docling OCR and layout models: {status?.docling_models_available ? "available" : "not available"}.</p>
+  </div>;
+}
+
+function DashboardWorkspace({ invoices, counts, loading, error, search, emailStatus, onEmail, onPollEmail, onOpen, onInvoices, onDocuments, onRefresh }: {
   invoices: InvoiceItem[];
   counts: Record<InvoiceItem["status"], number>;
   loading: boolean;
   error: string;
   search: string;
+  emailStatus: EmailStatus | null;
+  onEmail: () => void;
+  onPollEmail: () => void;
   onOpen: (invoice: InvoiceItem) => void;
   onInvoices: () => void;
   onDocuments: () => void;
@@ -671,6 +956,7 @@ function DashboardWorkspace({ invoices, counts, loading, error, search, onOpen, 
         {loading ? <AttentionSkeleton/> : attention.length ? <div className="attention-list">{attention.map((invoice, index) => <button className="attention-row" key={invoice.invoice_id} onClick={() => onOpen(invoice)} style={{ "--row-index": index } as React.CSSProperties}><span className="attention-vendor-icon">{(invoice.vendor_name || "V").slice(0, 1).toUpperCase()}</span><span className="attention-copy"><b>{invoice.vendor_name || "Unknown vendor"}</b><small>{invoice.invoice_no || "Invoice"}{invoice.invoice_date ? ` · ${dateLabel(invoice.invoice_date)}` : ""}</small></span><span className="attention-amount">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</span><span className="attention-arrow" aria-hidden="true">→</span></button>)}<Button variant="ghost" className="attention-more" onClick={onInvoices}>Review all invoices <span aria-hidden="true">→</span></Button></div> : <EmptyState title="You’re all caught up" description="There are no invoices waiting for review."/>}
       </Card>
     </section>
+    <Card className="panel email-dashboard-card"><div className="panel-head"><div><span className="eyebrow purple">INBOUND DOCUMENTS</span><h2>Email inbox</h2><p className="muted">Review vendor emails and document intake.</p></div><div className="toolbar"><Button variant="secondary" onClick={onEmail}>Open inbox</Button><Button variant="primary" onClick={onPollEmail}>Poll now</Button></div></div><div className="email-inbox-status"><span><small>Last poll</small><b>{emailStatus?.last_run_at ? dateTimeLabel(emailStatus.last_run_at) : "Not polled yet"}</b></span><span><small>Fetched</small><b>{emailPollCount(emailStatus, "mails_found", "emails")}</b></span><span><small>Skipped</small><b>{emailPollCount(emailStatus, "skipped", "filtered")}</b></span><span><small>Processed</small><b>{emailPollCount(emailStatus, "new_documents", "documents_created")}</b></span><span><small>Failed</small><b>{emailStatus?.counts?.failed || 0}</b></span></div>{emailStatus && !emailStatus.docling_models_available && <div className="notice error">OCR models are not installed. Ask an admin to run the model download.</div>}</Card>
     <div className="dashboard-footer-note"><span className="dashboard-note-icon">i</span><span>Dashboard metrics reflect the invoice data available to your account.</span></div>
   </div>;
 }
@@ -717,7 +1003,8 @@ function InvoiceReviewDrawer({ invoice, candidates, onClose, onMatch, onDecision
   const issues = rows.filter(item => !item.resolved);
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];
   const hasNoReceipt = issues.some(item => item.field.includes("accepted_quantity") || item.field.includes("goods_receipt"));
-  return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice">×</button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span></div>
+  return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice">×</button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></div>
+    {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}
     <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{labels.map(([label, keys]) => { const value = keys.map(key => invoice[key]).find(item => item != null && item !== ""); if (value == null || (typeof value !== "string" && typeof value !== "number")) return null; const shown = ["invoice_date", "due_date"].includes(String(keys[0])) ? dateLabel(String(value)) : String(value); return <DetailField key={label} label={label} value={shown}/>; })}</div></section>
     <section className="extracted-section"><h3 className="section-title">Amounts</h3><div className="field-grid"><DetailField label="Subtotal" value={invoice.subtotal == null ? undefined : formatInvoiceMoney(invoice.subtotal, invoice.currency)}/><DetailField label="Tax" value={invoice.tax_amount == null ? undefined : formatInvoiceMoney(invoice.tax_amount, invoice.currency)}/><DetailField label="Total" value={invoice.total_amount == null ? undefined : formatInvoiceMoney(invoice.total_amount, invoice.currency)}/></div></section>
     {(invoice.line_items || []).length > 0 && <section className="extracted-section"><h3 className="section-title">Line Items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.line_items!.map((line, index) => { const qty = Number(line.qty); return <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty == null || !Number.isFinite(qty) ? "" : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(qty)}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.currency)}</td><td>{line.amount == null ? "" : formatInvoiceMoney(line.amount, invoice.currency)}</td></tr>; })}</tbody></table></div></section>}

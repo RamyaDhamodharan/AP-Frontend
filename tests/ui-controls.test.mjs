@@ -7,7 +7,7 @@ import { userFacingErrorMessage } from "../src/errorMessages.ts";
 import { documentActionAvailability, isValidDocumentId } from "../src/documentIds.ts";
 import { documentDetailSectionTitle, linkedRecordDestination } from "../src/documentNavigation.ts";
 import { vendorMatches } from "../src/vendorMatching.ts";
-import { sourceFileActionAvailability } from "../src/sourceFileActions.ts";
+import { sourceFileActionAvailability, sourceFilePreviewMime, sourceFileViewerMode } from "../src/sourceFileActions.ts";
 import axios from "axios";
 
 test("Logs navigation and access are admin-only", () => {
@@ -31,13 +31,20 @@ test("upload selection allows five files and rejects larger batches clearly", ()
   assert.equal(uploadLimitMessage(6), UPLOAD_LIMIT_MESSAGE);
 });
 
-test("DOCX is a supported upload and is identified for download-only viewing", () => {
+test("DOCX is a supported upload and View document uses extracted content", () => {
   assert.equal(isSupportedUploadFilename("invoice.docx"), true);
   assert.equal(isSupportedUploadFilename("invoice.DOCX"), true);
   assert.equal(isSupportedUploadFilename("invoice.docm"), false);
   assert.equal(isSupportedUploadFilename("invoice.doc"), false);
   assert.equal(isDocxFilename("invoice.DOCX"), true);
   assert.equal(isDocxFilename("invoice.docm"), false);
+  assert.equal(sourceFileViewerMode("invoice.docx"), "extracted-preview");
+  assert.equal(sourceFileViewerMode("invoice.pdf"), "inline");
+  assert.equal(sourceFileViewerMode("photo.png"), "inline");
+  assert.equal(sourceFilePreviewMime("invoice.pdf"), "application/pdf");
+  assert.equal(sourceFilePreviewMime("photo.jpg"), "image/jpeg");
+  assert.equal(sourceFileViewerMode("message.eml"), "unsupported");
+  assert.equal(sourceFilePreviewMime("message.eml"), null);
 });
 
 test("file API errors are mapped to plain user messages", () => {

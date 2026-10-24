@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { createAuthSession } from "./authSession";
@@ -9,11 +9,12 @@ import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { ProcurementWorkspacePage } from "./components/ProcurementWorkspacePage";
 import { VendorsPage } from "./components/VendorsPage";
 import { SourceFileActions } from "./components/SourceFileActions";
+import { sourceFilePreviewMime, sourceFileViewerMode } from "./sourceFileActions";
 import { UnknownVendorPrompt, type UnknownVendorInfo } from "./components/UnknownVendorPrompt";
 import { LogsPage } from "./components/LogsPage";
 import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
-import { isDocxFilename, isSupportedUploadFilename, uploadLimitMessage } from "./uploadLimits";
+import { isSupportedUploadFilename, uploadLimitMessage } from "./uploadLimits";
 import { userFacingErrorMessage } from "./errorMessages";
 import { documentActionAvailability, isValidDocumentId } from "./documentIds";
 import { documentDetailSectionTitle, linkedRecordDestination } from "./documentNavigation";
@@ -21,8 +22,8 @@ import { vendorMatches } from "./vendorMatching";
 import { Sidebar, type WorkspacePage } from "./components/Sidebar";
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CircleAlert, CircleCheck,
-  CircleHelp, CirclePause, CircleX, ChevronDown, Download, ExternalLink, FileImage,
-  FileText, Menu, RefreshCw, RotateCcw, Search, ShieldCheck, X, Upload,
+  CircleHelp, CirclePause, CircleX, ChevronDown, Download, FileImage,
+  Eye, FileText, Menu, RefreshCw, RotateCcw, Search, ShieldCheck, X, Upload,
 } from "lucide-react";
 import "./styles/globals.css";
 import "./styles/modern.css";
@@ -64,6 +65,10 @@ type Doc = {
   email_received_at?: string | null; linked_invoice_id?: string | null;
   linked_invoice_status?: string | null; linked_po_id?: string | null; linked_gr_id?: string | null;
 };
+type FilePreviewState =
+  | { kind: "loading"; filename: string }
+  | { kind: "binary"; filename: string; url: string; mime: string }
+  | { kind: "docx"; filename: string; document: Doc };
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
 type ProcurementLine = { item_code?: string | null; description?: string | null; qty?: number | string | null; unit_price?: number | string | null; line_amount?: number | string | null; received_qty?: number | string | null; accepted_qty?: number | string | null; rejected_qty?: number | string | null };
@@ -207,7 +212,19 @@ function App() {
   const [unknownVendor, setUnknownVendor] = useState<UnknownVendorInfo | null>(null);
   const [unknownVendorBusy, setUnknownVendorBusy] = useState(false);
   const [unknownVendorError, setUnknownVendorError] = useState("");
-  const [filePreview, setFilePreview] = useState<{ url: string; filename: string } | null>(null);
+  const [filePreview, setFilePreview] = useState<FilePreviewState | null>(null);
+  const filePreviewRequestId = useRef(0);
+  useEffect(() => {
+    if (!filePreview) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeFilePreview();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      if (filePreview.kind === "binary") URL.revokeObjectURL(filePreview.url);
+    };
+  }, [filePreview]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
@@ -748,30 +765,45 @@ function App() {
       await openInvoice(selectedInvoice.invoice_id); await loadInvoices();
     } catch (error) { notify(getError(error, "Could not update the suggested match."), "error"); }
   }
+  function closeFilePreview() {
+    filePreviewRequestId.current += 1;
+    setFilePreview(null);
+  }
   async function openOriginalFile(doc: Doc) {
     if (!isValidDocumentId(doc.id)) return;
-    if (isDocxFilename(doc.original_filename)) {
-      await downloadOriginalFile(doc);
+    const viewerMode = sourceFileViewerMode(doc.original_filename);
+    if (viewerMode === "unsupported") {
+      notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
       return;
     }
-    const previewWindow = window.open("about:blank", "_blank");
-    if (previewWindow) previewWindow.opener = null;
+    if (viewerMode === "extracted-preview") {
+      filePreviewRequestId.current += 1;
+      setFilePreview({ kind: "docx", filename: doc.original_filename, document: doc });
+      return;
+    }
+    const requestId = ++filePreviewRequestId.current;
+    setFilePreview({ kind: "loading", filename: doc.original_filename });
     try {
       const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
         params: { disposition: "inline" }, headers: authHeaders(), responseType: "blob",
       });
-      const contentType = response.headers["content-type"];
-      const mime = (typeof contentType === "string" ? contentType : "") || response.data.type || "application/octet-stream";
-      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
-      if (previewWindow) {
-        previewWindow.location.replace(url);
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      } else {
-        setFilePreview({ url, filename: doc.original_filename });
+      const mime = sourceFilePreviewMime(doc.original_filename);
+      if (!mime) {
+        setFilePreview(null);
+        notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
+        return;
       }
+      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
+      if (requestId !== filePreviewRequestId.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      setFilePreview({ kind: "binary", url, mime, filename: doc.original_filename });
     } catch (error) {
-      previewWindow?.close();
-      notify(getError(error, "Could not open the original file."), "error");
+      if (requestId === filePreviewRequestId.current) {
+        setFilePreview(null);
+        notify(getError(error, "Could not open the original file."), "error");
+      }
     }
   }
   async function downloadOriginalFile(doc: Doc) {
@@ -793,7 +825,7 @@ function App() {
     try {
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${sourceDocumentId}`, { headers: authHeaders() });
       const source = { ...response.data, id: sourceDocumentId };
-      if (download || isDocxFilename(source.original_filename)) await downloadOriginalFile(source);
+      if (download) await downloadOriginalFile(source);
       else await openOriginalFile(source);
     } catch (error) { notify(getError(error, "Could not open the original file."), "error"); }
   }
@@ -985,16 +1017,15 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentRetryTimeline doc={selectedDoc}/><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); const docx = isDocxFilename(selectedDoc.original_filename); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}>{docx ? <Download {...iconProps}/> : <ExternalLink {...iconProps}/>} {docx ? "Download to view" : "View original"}</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && (selectedDoc.status.toLowerCase() !== "failed" || selectedDoc.failure_class !== "permanent") && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentRetryTimeline doc={selectedDoc}/><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}><Eye {...iconProps}/> View document</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && (selectedDoc.status.toLowerCase() !== "failed" || selectedDoc.failure_class !== "permanent") && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
-    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) { URL.revokeObjectURL(filePreview.url); setFilePreview(null); } }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><h2 id="file-preview-title">{filePreview.filename}</h2><button className="modal-close" aria-label="Close file preview" onClick={() => { URL.revokeObjectURL(filePreview.url); setFilePreview(null); }}><X {...iconProps}/></button></header><iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/></section></div>}
+    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) closeFilePreview(); }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><div><h2 id="file-preview-title">{filePreview.filename}</h2>{filePreview.kind === "docx" && <p className="muted">Preview of extracted content</p>}</div><button className="modal-close" aria-label="Close file preview" onClick={closeFilePreview}><X {...iconProps}/></button></header>{filePreview.kind === "loading" ? <div className="file-preview-loading" role="status" aria-live="polite"><span className="spinner"/> Loading document preview…</div> : filePreview.kind === "docx" ? <DocxExtractedPreview doc={filePreview.document}/> : filePreview.mime.startsWith("image/") ? <div className="file-preview-content"><img alt={`Preview of ${filePreview.filename}`} src={filePreview.url}/></div> : <iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/>}</section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer
           invoice={selectedInvoice}
           initialTab={invoiceDrawerTab}
           authHeaders={authHeaders}
-          coreUrl={CORE_URL}
           onViewOriginal={id => void openOriginalSource(id)}
           onDownloadOriginal={id => void openOriginalSource(id, true)}
           candidates={matchCandidates}
@@ -1113,6 +1144,40 @@ function DocumentExtractedDetails({ doc }: { doc: Doc }) {
     {!ownFieldsPresent && !amountFields.some(field => pick(source, field.keys) !== undefined) && !lines.length && <p className="muted">No {sectionTitle.toLowerCase()} details are available yet.</p>}
   </div>;
 }
+
+function DocxExtractedPreview({ doc }: { doc: Doc }) {
+  const data = record(doc.extracted_json);
+  const source = {
+    ...data,
+    ...record(data.extraction),
+    ...record(data.fields),
+    ...record(data.invoice),
+    ...record(data.purchase_order),
+    ...record(data.goods_receipt),
+  };
+  const lineValue = pick(source, ["line_items", "items"]);
+  const lines = Array.isArray(lineValue) ? lineValue.map(record) : [];
+  const hiddenKeys = new Set(["raw_text", "text", "line_items", "items", "confidence", "field_confidence"]);
+  const fields = Object.entries(source).filter(([key, value]) =>
+    !hiddenKeys.has(key.toLowerCase()) &&
+    (typeof value === "string" || typeof value === "number" || typeof value === "boolean") &&
+    String(value).trim().length > 0
+  );
+  const text = doc.raw_text?.trim() || (typeof source.text === "string" ? source.text.trim() : "");
+  if (!text && !fields.length && !lines.length) {
+    return <div className="file-preview-content"><p className="muted" role="status">No extracted content is available to preview for this document.</p></div>;
+  }
+  const lineValueText = (line: Record<string, unknown>, keys: string[]) => {
+    const value = pick(line, keys);
+    return value == null ? "" : String(value);
+  };
+  return <div className="file-preview-content docx-extracted-preview">
+    {text && <section><h3>Extracted text</h3><pre>{text}</pre></section>}
+    {fields.length > 0 && <section><h3>Extracted fields</h3><dl className="docx-preview-fields">{fields.map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{String(value)}</dd></Fragment>)}</dl></section>}
+    {lines.length > 0 && <section><h3>Extracted line items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Item code</th><th>Quantity</th><th>Unit price</th><th>Amount</th></tr></thead><tbody>{lines.map((line, index) => <tr key={index}><td>{lineValueText(line, ["description", "item_description", "name"])}</td><td>{lineValueText(line, ["item_code", "sku", "code"])}</td><td>{lineValueText(line, ["qty", "quantity"])}</td><td>{lineValueText(line, ["unit_price", "price"])}</td><td>{lineValueText(line, ["amount", "line_amount", "line_total", "total"])}</td></tr>)}</tbody></table></div></section>}
+  </div>;
+}
+
 function Pagination({ page, total, pageSize, loading, onChange }: { page: number; total: number; pageSize: number; loading: boolean; onChange: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div className="pagination"><span>Showing page <b>{page}</b> of <b>{pages}</b> · {total} records</span><div><button className="secondary" disabled={loading || page <= 1} onClick={() => onChange(page - 1)}><ArrowLeft {...iconProps}/> Previous</button><button className="secondary" disabled={loading || page >= pages} onClick={() => onChange(page + 1)}>Next <ArrowRight {...iconProps}/></button></div></div>; }
 
 const invoiceStatuses: InvoiceItem["status"][] = ["processing", "needs_review", "ready_to_pay", "on_hold", "rejected"];
@@ -1259,7 +1324,7 @@ function InvoiceComparisonRow({ item, currency }: { item: NonNullable<InvoiceDet
   const cls = item.resolved ? "matched" : item.severity === "error" ? "mismatch" : "within-tolerance";
   return <tr className={`comparison-row comparison-row-${cls}`}><td>{humanize(item.field)}</td><td>{render(item.invoice_value)}</td><td>{render(item.po_value)}</td><td>{render(item.gr_value)}</td><td><span className={`comparison-result ${cls}`}>{result}</span></td></tr>;
 }
-function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders, coreUrl, onViewOriginal, onDownloadOriginal }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; initialTab: "details" | "timeline"; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string }; coreUrl: string; onViewOriginal: (id: string | null | undefined) => void; onDownloadOriginal: (id: string | null | undefined) => void }) {
+function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders, onViewOriginal, onDownloadOriginal }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; initialTab: "details" | "timeline"; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string }; onViewOriginal: (id: string | null | undefined) => void; onDownloadOriginal: (id: string | null | undefined) => void }) {
   const [activeTab, setActiveTab] = useState<"details" | "timeline">(initialTab);
   useEffect(() => setActiveTab(initialTab), [initialTab, invoice.invoice_id]);
   const rows = [...(invoice.discrepancies || [])].sort((a, b) => Number(Boolean(a.resolved)) - Number(Boolean(b.resolved)) || (a.severity === "error" ? -1 : 1));
@@ -1267,11 +1332,11 @@ function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, on
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];
   const hasNoReceipt = issues.some(item => item.field.includes("accepted_quantity") || item.field.includes("goods_receipt"));
   return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice"><X {...iconProps}/></button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></div>
-    <SourceFileActions sourceDocumentId={invoice.source_document_id} coreUrl={coreUrl} authHeaders={authHeaders} onView={onViewOriginal} onDownload={onDownloadOriginal}/><Tabs label="Invoice details" tabs={[{ id: "details", label: "Details" }, { id: "timeline", label: "Timeline" }]} value={activeTab} onChange={setActiveTab}/>
+    <SourceFileActions sourceDocumentId={invoice.source_document_id} onView={onViewOriginal} onDownload={onDownloadOriginal}/><Tabs label="Invoice details" tabs={[{ id: "details", label: "Details" }, { id: "timeline", label: "Timeline" }]} value={activeTab} onChange={setActiveTab}/>
     {activeTab === "timeline" ? <InvoiceTimeline invoiceId={invoice.invoice_id} sourceDocumentId={invoice.source_document_id} coreUrl={CORE_URL} authHeaders={authHeaders}/> : <>
     <section className="extracted-section"><h3 className="section-title">Confidence</h3><p>Overall confidence: {humanize(invoice.match_outcome?.confidence_level || invoice.confidence_level || "low")}</p>{invoice.match_outcome?.confidence_levels && <div className="field-grid">{Object.entries(invoice.match_outcome.confidence_levels).map(([field, level]) => <DetailField key={field} label={humanize(field.replaceAll("_", " "))} value={humanize(level)}/>)}</div>}</section>
-    {invoice.linked_purchase_order && <section className="extracted-section"><h3 className="section-title">Linked Purchase Order</h3><div className="field-grid"><DetailField label="PO Number" value={invoice.linked_purchase_order.po_number}/><DetailField label="Vendor" value={invoice.linked_purchase_order.vendor_name}/><DetailField label="PO Date" value={invoice.linked_purchase_order.po_date ? dateLabel(invoice.linked_purchase_order.po_date) : undefined}/><DetailField label="Total" value={invoice.linked_purchase_order.total_amount == null ? undefined : formatInvoiceMoney(invoice.linked_purchase_order.total_amount, invoice.linked_purchase_order.currency)}/></div><SourceFileActions sourceDocumentId={invoice.linked_purchase_order.source_document_id} coreUrl={coreUrl} authHeaders={authHeaders} onView={onViewOriginal} onDownload={onDownloadOriginal}/>{invoice.linked_purchase_order.lines.length > 0 && <div className="table-wrap"><table className="line-items-table"><thead><tr><th>PO Line</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.linked_purchase_order.lines.map((line, index) => <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty ?? ""}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.linked_purchase_order?.currency)}</td><td>{line.line_amount == null ? "" : formatInvoiceMoney(line.line_amount, invoice.linked_purchase_order?.currency)}</td></tr>)}</tbody></table></div>}</section>}
-    {(invoice.linked_goods_receipts || []).map(receipt => <section className="extracted-section" key={receipt.id}><h3 className="section-title">Linked Goods Receipt</h3><div className="field-grid"><DetailField label="Receipt Number" value={receipt.gr_number}/><DetailField label="Receipt Date" value={receipt.receipt_date ? dateLabel(receipt.receipt_date) : undefined}/></div><SourceFileActions sourceDocumentId={receipt.source_document_id} coreUrl={coreUrl} authHeaders={authHeaders} onView={onViewOriginal} onDownload={onDownloadOriginal}/><div className="table-wrap"><table className="line-items-table"><thead><tr><th>GR Line</th><th>Received</th><th>Accepted</th><th>Rejected</th></tr></thead><tbody>{receipt.lines.map((line, index) => <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.received_qty ?? ""}</td><td>{line.accepted_qty ?? ""}</td><td>{line.rejected_qty ?? ""}</td></tr>)}</tbody></table></div></section>)}
+    {invoice.linked_purchase_order && <section className="extracted-section"><h3 className="section-title">Linked Purchase Order</h3><div className="field-grid"><DetailField label="PO Number" value={invoice.linked_purchase_order.po_number}/><DetailField label="Vendor" value={invoice.linked_purchase_order.vendor_name}/><DetailField label="PO Date" value={invoice.linked_purchase_order.po_date ? dateLabel(invoice.linked_purchase_order.po_date) : undefined}/><DetailField label="Total" value={invoice.linked_purchase_order.total_amount == null ? undefined : formatInvoiceMoney(invoice.linked_purchase_order.total_amount, invoice.linked_purchase_order.currency)}/></div><SourceFileActions sourceDocumentId={invoice.linked_purchase_order.source_document_id} onView={onViewOriginal} onDownload={onDownloadOriginal}/>{invoice.linked_purchase_order.lines.length > 0 && <div className="table-wrap"><table className="line-items-table"><thead><tr><th>PO Line</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.linked_purchase_order.lines.map((line, index) => <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty ?? ""}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.linked_purchase_order?.currency)}</td><td>{line.line_amount == null ? "" : formatInvoiceMoney(line.line_amount, invoice.linked_purchase_order?.currency)}</td></tr>)}</tbody></table></div>}</section>}
+    {(invoice.linked_goods_receipts || []).map(receipt => <section className="extracted-section" key={receipt.id}><h3 className="section-title">Linked Goods Receipt</h3><div className="field-grid"><DetailField label="Receipt Number" value={receipt.gr_number}/><DetailField label="Receipt Date" value={receipt.receipt_date ? dateLabel(receipt.receipt_date) : undefined}/></div><SourceFileActions sourceDocumentId={receipt.source_document_id} onView={onViewOriginal} onDownload={onDownloadOriginal}/><div className="table-wrap"><table className="line-items-table"><thead><tr><th>GR Line</th><th>Received</th><th>Accepted</th><th>Rejected</th></tr></thead><tbody>{receipt.lines.map((line, index) => <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.received_qty ?? ""}</td><td>{line.accepted_qty ?? ""}</td><td>{line.rejected_qty ?? ""}</td></tr>)}</tbody></table></div></section>)}
     <section className="extracted-section"><h3 className="section-title">Match Checklist</h3><p>Payment status: {invoice.payment_status || "Not paid"}</p><div className="table-wrap"><table className="comparison-table"><thead><tr><th>Check</th><th>Invoice</th><th>Expected</th><th>Status</th></tr></thead><tbody>{invoice.match_checks?.map(check => <tr key={check.code}><td>{check.label}</td><td>{safeCompareValue(check.invoice_value)}</td><td>{safeCompareValue(check.expected_value)}</td><td>{humanize(check.status)}</td></tr>)}</tbody></table></div></section>
     {noMatchDraft && <div className="notice info no-match-draft-banner"><strong>Draft ready to review</strong><p>A no-match email is ready. Review and edit it before sending.</p><Button variant="secondary" onClick={onReviewNoMatchDraft}>Review email draft</Button></div>}
     {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}

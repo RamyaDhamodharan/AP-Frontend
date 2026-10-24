@@ -13,7 +13,7 @@ import { uploadLimitMessage } from "./uploadLimits";
 import { Sidebar, type WorkspacePage } from "./components/Sidebar";
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CircleAlert, CircleCheck,
-  CircleHelp, CirclePause, CircleX, ChevronDown, ExternalLink, FileImage,
+  CircleHelp, CirclePause, CircleX, ChevronDown, Download, ExternalLink, FileImage,
   FileText, Menu, RefreshCw, RotateCcw, Search, ShieldCheck, X, Upload,
 } from "lucide-react";
 import "./styles/globals.css";
@@ -198,6 +198,7 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isDraggingDocuments, setIsDraggingDocuments] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  const [filePreview, setFilePreview] = useState<{ url: string; filename: string } | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
@@ -616,13 +617,15 @@ function App() {
     try {
       if (doc.linked_invoice_id) {
         setSelectedDoc(null);
-        await openInvoice(doc.linked_invoice_id, "timeline");
+        setActivePage("invoices");
+        await openInvoice(doc.linked_invoice_id, "details");
         return;
       }
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
       if (response.data.linked_invoice_id) {
         setSelectedDoc(null);
-        await openInvoice(response.data.linked_invoice_id, "timeline");
+        setActivePage("invoices");
+        await openInvoice(response.data.linked_invoice_id, "details");
         return;
       }
       setSelectedDoc(response.data);
@@ -688,12 +691,38 @@ function App() {
     } catch (error) { notify(getError(error, "Could not update the suggested match."), "error"); }
   }
   async function openOriginalFile(doc: Doc) {
+    const previewWindow = window.open("about:blank", "_blank");
+    if (previewWindow) previewWindow.opener = null;
     try {
-      const response = await axios.get(`${CORE_URL}/api/documents/${doc.id}/file`, { headers: authHeaders(), responseType: "blob" });
-      const url = URL.createObjectURL(response.data); const tab = window.open(url, "_blank", "noopener,noreferrer");
-      if (!tab) { const link = document.createElement("a"); link.href = url; link.download = doc.original_filename; link.click(); }
+      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
+        params: { disposition: "inline" }, headers: authHeaders(), responseType: "blob",
+      });
+      const contentType = response.headers["content-type"];
+      const mime = (typeof contentType === "string" ? contentType : "") || response.data.type || "application/octet-stream";
+      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
+      if (previewWindow) {
+        previewWindow.location.replace(url);
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      } else {
+        setFilePreview({ url, filename: doc.original_filename });
+      }
+    } catch (error) {
+      previewWindow?.close();
+      notify(getError(error, "Could not open the original file."), "error");
+    }
+  }
+  async function downloadOriginalFile(doc: Doc) {
+    try {
+      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
+        params: { disposition: "attachment" }, headers: authHeaders(), responseType: "blob",
+      });
+      const contentType = response.headers["content-type"];
+      const mime = (typeof contentType === "string" ? contentType : "") || response.data.type || "application/octet-stream";
+      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
+      const link = document.createElement("a");
+      link.href = url; link.download = doc.original_filename; link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error) { notify(getError(error, "Could not open the original file."), "error"); }
+    } catch (error) { notify(getError(error, "Could not download the original file."), "error"); }
   }
   async function retryDocument(doc: Doc) {
     try {
@@ -853,8 +882,9 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}><ExternalLink {...iconProps}/> Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}><RotateCcw {...iconProps}/> Retry processing</button>}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}><ExternalLink {...iconProps}/> View original</button><button className="secondary" onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}><RotateCcw {...iconProps}/> Retry processing</button>}</div></div>}
     </section></div>}
+    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) { URL.revokeObjectURL(filePreview.url); setFilePreview(null); } }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><h2 id="file-preview-title">{filePreview.filename}</h2><button className="modal-close" aria-label="Close file preview" onClick={() => { URL.revokeObjectURL(filePreview.url); setFilePreview(null); }}><X {...iconProps}/></button></header><iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/></section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer

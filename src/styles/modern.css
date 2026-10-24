@@ -549,6 +549,9 @@ button, input, select, textarea { border-radius: var(--radius-sm); }
 .logs-loading { display: grid; gap: 8px; padding: 16px; }
 .logs-loading > div { display: grid; grid-template-columns: repeat(7, minmax(80px, 1fr)); gap: 12px; }
 .logs-detail-panel { width: min(100%, 760px); max-height: 90vh; overflow-y: auto; }
+.file-preview-modal { display: flex; width: min(96vw, 1100px); height: 90vh; max-height: 90vh; flex-direction: column; }
+.file-preview-modal .modal-head { flex: 0 0 auto; }
+.file-preview-modal iframe { width: 100%; min-height: 0; flex: 1 1 auto; border: 0; }
 .logs-detail-grid { display: grid; grid-template-columns: 150px 1fr; gap: 8px 12px; }
 .logs-detail-grid dt { color: var(--text-secondary); font-weight: 700; }
 .logs-detail-grid dd { margin: 0; overflow-wrap: anywhere; }

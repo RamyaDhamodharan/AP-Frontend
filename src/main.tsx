@@ -68,7 +68,7 @@ type Doc = {
 type FilePreviewState =
   | { kind: "loading"; filename: string }
   | { kind: "binary"; filename: string; url: string; mime: string }
-  | { kind: "docx"; filename: string; document: Doc };
+  | { kind: "docx"; filename: string; document: Doc; fallback?: boolean };
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
 type ProcurementLine = { item_code?: string | null; description?: string | null; qty?: number | string | null; unit_price?: number | string | null; line_amount?: number | string | null; received_qty?: number | string | null; accepted_qty?: number | string | null; rejected_qty?: number | string | null };
@@ -776,18 +776,14 @@ function App() {
       notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
       return;
     }
-    if (viewerMode === "extracted-preview") {
-      filePreviewRequestId.current += 1;
-      setFilePreview({ kind: "docx", filename: doc.original_filename, document: doc });
-      return;
-    }
+    const isDocx = viewerMode === "extracted-preview";
     const requestId = ++filePreviewRequestId.current;
     setFilePreview({ kind: "loading", filename: doc.original_filename });
     try {
-      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
-        params: { disposition: "inline" }, headers: authHeaders(), responseType: "blob",
+      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/${isDocx ? "preview" : "file"}`, {
+        ...(isDocx ? {} : { params: { disposition: "inline" } }), headers: authHeaders(), responseType: "blob",
       });
-      const mime = sourceFilePreviewMime(doc.original_filename);
+      const mime = isDocx ? "application/pdf" : sourceFilePreviewMime(doc.original_filename);
       if (!mime) {
         setFilePreview(null);
         notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
@@ -801,8 +797,12 @@ function App() {
       setFilePreview({ kind: "binary", url, mime, filename: doc.original_filename });
     } catch (error) {
       if (requestId === filePreviewRequestId.current) {
-        setFilePreview(null);
-        notify(getError(error, "Could not open the original file."), "error");
+        if (isDocx) {
+          setFilePreview({ kind: "docx", filename: doc.original_filename, document: doc, fallback: true });
+        } else {
+          setFilePreview(null);
+          notify(getError(error, "Could not open the original file."), "error");
+        }
       }
     }
   }
@@ -1019,7 +1019,7 @@ function App() {
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
       {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentRetryTimeline doc={selectedDoc}/><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}><Eye {...iconProps}/> View document</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && (selectedDoc.status.toLowerCase() !== "failed" || selectedDoc.failure_class !== "permanent") && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
-    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) closeFilePreview(); }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><div><h2 id="file-preview-title">{filePreview.filename}</h2>{filePreview.kind === "docx" && <p className="muted">Preview of extracted content</p>}</div><button className="modal-close" aria-label="Close file preview" onClick={closeFilePreview}><X {...iconProps}/></button></header>{filePreview.kind === "loading" ? <div className="file-preview-loading" role="status" aria-live="polite"><span className="spinner"/> Loading document preview…</div> : filePreview.kind === "docx" ? <DocxExtractedPreview doc={filePreview.document}/> : filePreview.mime.startsWith("image/") ? <div className="file-preview-content"><img alt={`Preview of ${filePreview.filename}`} src={filePreview.url}/></div> : <iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/>}</section></div>}
+    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) closeFilePreview(); }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><div><h2 id="file-preview-title">{filePreview.filename}</h2>{filePreview.kind === "docx" && <p className="muted">{filePreview.fallback ? "Preview unavailable, showing extracted text" : "Preview of extracted content"}</p>}</div><button className="modal-close" aria-label="Close file preview" onClick={closeFilePreview}><X {...iconProps}/></button></header>{filePreview.kind === "loading" ? <div className="file-preview-loading" role="status" aria-live="polite"><span className="spinner"/> Loading document preview...</div> : filePreview.kind === "docx" ? <DocxExtractedPreview doc={filePreview.document}/> : filePreview.mime.startsWith("image/") ? <div className="file-preview-content"><img alt={`Preview of ${filePreview.filename}`} src={filePreview.url}/></div> : <iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/>}</section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer
@@ -1163,7 +1163,7 @@ function DocxExtractedPreview({ doc }: { doc: Doc }) {
     (typeof value === "string" || typeof value === "number" || typeof value === "boolean") &&
     String(value).trim().length > 0
   );
-  const text = doc.raw_text?.trim() || (typeof source.text === "string" ? source.text.trim() : "");
+  const text = stripPreviewMarkdown(doc.raw_text?.trim() || (typeof source.text === "string" ? source.text.trim() : ""));
   if (!text && !fields.length && !lines.length) {
     return <div className="file-preview-content"><p className="muted" role="status">No extracted content is available to preview for this document.</p></div>;
   }
@@ -1176,6 +1176,10 @@ function DocxExtractedPreview({ doc }: { doc: Doc }) {
     {fields.length > 0 && <section><h3>Extracted fields</h3><dl className="docx-preview-fields">{fields.map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{String(value)}</dd></Fragment>)}</dl></section>}
     {lines.length > 0 && <section><h3>Extracted line items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Item code</th><th>Quantity</th><th>Unit price</th><th>Amount</th></tr></thead><tbody>{lines.map((line, index) => <tr key={index}><td>{lineValueText(line, ["description", "item_description", "name"])}</td><td>{lineValueText(line, ["item_code", "sku", "code"])}</td><td>{lineValueText(line, ["qty", "quantity"])}</td><td>{lineValueText(line, ["unit_price", "price"])}</td><td>{lineValueText(line, ["amount", "line_amount", "line_total", "total"])}</td></tr>)}</tbody></table></div></section>}
   </div>;
+}
+
+function stripPreviewMarkdown(value: string) {
+  return value.replaceAll("**", "").replace(/^\s*#+\s?/gm, "");
 }
 
 function Pagination({ page, total, pageSize, loading, onChange }: { page: number; total: number; pageSize: number; loading: boolean; onChange: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div className="pagination"><span>Showing page <b>{page}</b> of <b>{pages}</b> · {total} records</span><div><button className="secondary" disabled={loading || page <= 1} onClick={() => onChange(page - 1)}><ArrowLeft {...iconProps}/> Previous</button><button className="secondary" disabled={loading || page >= pages} onClick={() => onChange(page + 1)}>Next <ArrowRight {...iconProps}/></button></div></div>; }

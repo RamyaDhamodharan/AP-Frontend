@@ -12,6 +12,7 @@ import { confidenceLabel } from "../src/procurementControls.ts";
 import { documentStatusLabel, isDocumentProcessing, isRetryScheduled } from "../src/documentStatus.ts";
 import axios from "axios";
 import { addAndResolveVendor } from "../src/vendorResolution.ts";
+import { confidenceDisplay, groupLowConfidenceFields } from "../src/confidenceDisplay.ts";
 
 test("Logs navigation and access are admin-only", () => {
   assert.equal(canSeeAdminNavigation("admin"), true);
@@ -158,4 +159,11 @@ test("invoice confidence labels use display thresholds without raw scores", () =
   assert.equal(confidenceLabel(75), "Medium");
   assert.equal(confidenceLabel(74), "Low");
   assert.equal(confidenceLabel(undefined), "Unverified");
+});
+
+test("invoice confidence percent drives compact color and grouped verification fields", () => {
+  assert.deepEqual(confidenceDisplay(85), { percent: 85, label: "High", tone: "green" });
+  assert.deepEqual(confidenceDisplay(84), { percent: 84, label: "Medium", tone: "amber" });
+  assert.deepEqual(confidenceDisplay(74), { percent: 74, label: "Low", tone: "red" });
+  assert.deepEqual(groupLowConfidenceFields(["vendor", "line_1.qty", "line_2.unit_price"]), { header: ["vendor"], lines: ["1.qty", "2.unit_price"] });
 });

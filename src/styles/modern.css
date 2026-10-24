@@ -43,7 +43,8 @@
   --ease-standard: ease-out;
   --ease-emphasis: cubic-bezier(.16, 1, .3, 1);
   --line: 1px solid var(--border);
-  --radius-square: 0;
+  --radius-sm: 4px;
+  --radius-md: 6px;
   --radius-pill: 999px;
   color: var(--navy);
   background: var(--warm-white);
@@ -60,7 +61,7 @@
   min-height: 40px;
   padding: 8px 12px;
   border: 1px solid var(--border);
-  border-radius: 0;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--navy);
   font: 600 14px/20px "Poppins", system-ui, sans-serif;
@@ -78,7 +79,7 @@
 .ui-card, .panel, .dashboard-card, .kpi-card, .document-card, .suggestion-card, .extracted-section {
   min-width: 0;
   border: var(--line);
-  border-radius: 0;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 .ui-badge, .pill, .invoice-status, .comparison-result, .discrepancy-badge {
@@ -115,7 +116,7 @@
 .form-label { display: block; margin: 16px 0; color: var(--navy); font: 600 12px/16px "Poppins", system-ui, sans-serif; }
 .form-label input, .form-label textarea, .toolbar select, .search, .topbar-search {
   border: var(--line);
-  border-radius: 0;
+  border-radius: var(--radius-sm);
   background: var(--warm-white);
   color: var(--navy);
 }
@@ -128,26 +129,42 @@
 
 /* App shell and navigation */
 .app-shell { display: flex; min-height: 100vh; background: var(--warm-white); }
-.sidebar { position: sticky; top: 0; display: flex; flex: 0 0 248px; flex-direction: column; gap: 0; width: 248px; height: 100vh; min-height: 100vh; padding: 24px 16px 16px; border: 0; border-right: 1px solid var(--border); border-radius: 0; background: var(--navy); color: var(--warm-white); }
-.sidebar .brand { padding: 0 8px 32px; color: var(--warm-white); }
+.sidebar { --sidebar-width: 240px; position: sticky; z-index: 30; top: 0; display: flex; flex: 0 0 var(--sidebar-width); flex-direction: column; gap: 0; width: var(--sidebar-width); height: 100vh; min-height: 100vh; padding: 16px 12px; border: 0; border-right: 1px solid var(--border); border-radius: 0; background: var(--navy); color: var(--warm-white); transition: width var(--duration-standard) var(--ease-standard), flex-basis var(--duration-standard) var(--ease-standard), padding var(--duration-standard) var(--ease-standard); }
+.sidebar.sidebar-collapsed { --sidebar-width: 64px; padding-inline: 8px; }
+.sidebar-brand-row { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
+.sidebar .brand { min-width: 0; padding: 0; color: var(--warm-white); }
+.sidebar-brand-copy { min-width: 0; }
+.sidebar-collapse-toggle { display: inline-flex; width: 36px; min-width: 36px; height: 36px; align-items: center; justify-content: center; padding: 8px; border: 1px solid rgb(249 249 247 / 35%); border-radius: var(--radius-sm); background: transparent; color: var(--warm-white); }
+.sidebar-collapse-toggle:hover, .sidebar-collapse-toggle:focus-visible { border-color: var(--orange); background: var(--navy-dark); }
+.sidebar-collapsed .sidebar-brand-copy { display: none; }
+.sidebar-collapsed .sidebar-brand-row { flex-direction: column; gap: 12px; margin-bottom: 16px; }
+.sidebar-collapsed .brand { justify-content: center; }
+.sidebar-collapsed .sidebar-collapse-toggle { order: -1; }
 .brand { display: flex; align-items: center; gap: 12px; color: var(--navy); font: 600 16px/20px "Poppins", system-ui, sans-serif; }
 .brand small { display: block; margin-top: 4px; color: inherit; font: 500 10px/14px "Poppins", system-ui, sans-serif; }
 .brand-mark { display: grid; width: 36px; height: 36px; flex: 0 0 36px; place-items: center; border: 1px solid currentColor; border-radius: 0; background: transparent; color: inherit; font: 600 18px/1 "Poppins", system-ui, sans-serif; }
 .brand-light { color: #fff; }
-.side-label { margin: 24px 12px 12px; color: rgb(249 249 247 / 75%); font: 600 12px/16px "Poppins", system-ui, sans-serif; letter-spacing: .06em; }
+.side-label { margin: 8px 12px 12px; color: rgb(249 249 247 / 75%); font: 600 12px/16px "Poppins", system-ui, sans-serif; letter-spacing: .06em; }
+.sidebar-collapsed .side-label { display: none; }
 .primary-nav { display: grid; gap: 4px; }
-.nav-item { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; margin: 0; padding: 8px 12px; border: 1px solid transparent; border-radius: 0; background: transparent; color: var(--warm-white); font: 500 14px/20px "Poppins", system-ui, sans-serif; text-align: left; transition: background-color var(--duration-micro) var(--ease-micro), transform var(--duration-micro) var(--ease-micro); }
+.nav-item { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; margin: 0; padding: 8px 12px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--warm-white); font: 500 14px/20px "Poppins", system-ui, sans-serif; text-align: left; transition: background-color var(--duration-micro) var(--ease-micro), transform var(--duration-micro) var(--ease-micro); }
 .nav-item:hover { background: var(--navy-dark); }
 .nav-item.nav-active { background: rgb(255 244 239 / 12%); color: #fff; }
 .nav-item.nav-active::before { position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--orange); content: ""; }
 .nav-item b { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
-.nav-icon { width: 24px; flex: 0 0 24px; color: inherit; font-size: 18px; text-align: center; }
+.nav-icon { display: inline-flex; width: 24px; flex: 0 0 24px; align-items: center; justify-content: center; color: inherit; }
+.sidebar-collapsed .nav-item { justify-content: center; gap: 0; padding-inline: 4px; }
+.sidebar-collapsed .nav-label, .sidebar-collapsed .sidebar-user-copy { display: none; }
+.sidebar-collapsed .nav-item b.nav-count { position: absolute; top: 6px; right: 7px; width: 7px; height: 7px; margin: 0; padding: 0; border: 1px solid var(--navy); border-radius: 50%; background: var(--orange); font-size: 0; }
+.nav-count-dot { display: block; width: 100%; height: 100%; }
 .sidebar-bottom { display: grid; gap: 12px; margin-top: auto; }
 .profile { display: flex; align-items: center; gap: 12px; width: 100%; margin: 0; padding: 12px 4px; border-top: 1px solid rgb(249 249 247 / 35%); }
 .profile b, .profile small { display: block; max-width: 165px; overflow: hidden; color: #fff; text-overflow: ellipsis; white-space: nowrap; }
 .profile b { font: 600 12px/16px "Poppins", system-ui, sans-serif; }
 .profile small { margin-top: 4px; font: 400 12px/16px "Lato", system-ui, sans-serif; }
-.avatar { display: grid; width: 36px; height: 36px; flex: 0 0 36px; place-items: center; border: 1px solid var(--border); border-radius: 0; background: var(--peach-light); color: var(--navy); font: 600 14px/20px "Poppins", system-ui, sans-serif; }
+.avatar { display: grid; width: 36px; height: 36px; flex: 0 0 36px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--peach-light); color: var(--navy); font: 600 14px/20px "Poppins", system-ui, sans-serif; }
+.sidebar-collapsed .profile { justify-content: center; padding-inline: 0; }
+.sidebar-collapsed .signout { justify-content: center; padding-inline: 0; }
 .signout { justify-content: flex-start; border-color: transparent; background: transparent; color: #fff; }
 .signout:hover { background: var(--navy-dark); }
 .main-area { min-width: 0; flex: 1; }
@@ -161,7 +178,7 @@
 .topbar-user { justify-self: end; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--navy); }
 .topbar-user-email { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .primary, .topbar .ui-button-primary { border-radius: var(--radius-pill); }
-.topbar-nav-toggle, .nav-toggle { display: none; }
+.topbar-nav-toggle { display: none; }
 .content { width: min(100%, 1600px); margin-inline: auto; padding: 32px; }
 .page-enter { animation: reveal 650ms var(--ease-emphasis) both; }
 @keyframes reveal { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }

@@ -1,9 +1,6 @@
-import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { userFacingErrorMessage } from "../errorMessages";
 import { Badge, Button, Card, EmptyState, Skeleton } from "./ui";
-import { InvoiceTimeline } from "./InvoiceTimeline";
 import type { FilterOwner, FilterVendor } from "./InvoiceFilters";
 
 const PAGE_SIZE = 25;
@@ -17,6 +14,7 @@ type AuditEntry = {
   duration_ms?: number | null; new_value?: Record<string, unknown> | null;
   output_summary?: Record<string, unknown> | null;
 };
+type TimelineEntry = AuditEntry & { kind?: string };
 type Props = {
   coreUrl: string;
   authHeaders: () => { Authorization: string };
@@ -75,6 +73,16 @@ function outputFor(summary?: Record<string, unknown> | null) {
   return values.slice(0, 3).join(" · ") || "—";
 }
 
+function errorText(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (error.response?.status === 403) return "You do not have access";
+    return error.response ? `Could not load logs. (HTTP ${error.response.status})` : "Cannot reach the audit service.";
+  }
+  return "Could not load logs.";
+}
+
 function rowInvoiceId(entry: AuditEntry) {
   if (entry.entity_type === "invoice") return entry.entity_id || null;
   const value = entry.output_summary?.invoice_id || entry.new_value?.invoice_id;
@@ -88,7 +96,9 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<AuditEntry | null>(null);
-  const [showTimeline, setShowTimeline] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineError, setTimelineError] = useState("");
 
   const update = useCallback((patch: Partial<LogQuery>) => {
     const next = { ...queryFromUrl(), ...patch };
@@ -135,7 +145,7 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
         setItems(response.data.items || []); setTotal(response.data.total || 0);
       } catch (loadError) {
         if (!current) return;
-        setError(userFacingErrorMessage(loadError, "Could not load logs. Refresh and try again."));
+        setError(loadError instanceof Error && !axios.isAxiosError(loadError) ? loadError.message : errorText(loadError));
         setItems([]); setTotal(0);
       } finally { if (current) setLoading(false); }
     }
@@ -153,8 +163,15 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
   }, [owners, userNames]);
 
   async function openEntry(entry: AuditEntry) {
-    setSelected(entry);
-    setShowTimeline(false);
+    setSelected(entry); setTimeline([]); setTimelineError("");
+    const invoiceId = rowInvoiceId(entry);
+    if (!invoiceId) return;
+    setTimelineLoading(true);
+    try {
+      const response = await axios.get<TimelineEntry[]>(`${coreUrl}/api/invoices/${invoiceId}/timeline`, { headers: authHeaders() });
+      setTimeline(response.data || []);
+    } catch (timelineLoadError) { setTimelineError(errorText(timelineLoadError)); }
+    finally { setTimelineLoading(false); }
   }
 
   return <div className="logs-page page-enter">
@@ -176,7 +193,7 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
       {error && <div className="notice error" role="alert">{error}<Button variant="secondary" onClick={() => setQuery({ ...query })}>Try again</Button></div>}
       {loading ? <div className="logs-loading" role="status" aria-label="Loading logs">{Array.from({ length: 7 }, (_, index) => <div key={index}>{Array.from({ length: 7 }, (_, cell) => <Skeleton key={cell}/>)}</div>)}</div>
         : items.length === 0 ? <EmptyState title="No logs found" description="No activity matches these filters."/>
-          : <div className="table-wrap logs-table-wrap"><table className="logs-table"><thead><tr><th><button type="button" className="logs-sort" onClick={() => update({ sort_dir: query.sort_dir === "asc" ? "desc" : "asc" })}>Date / time {query.sort_dir === "asc" ? <ArrowUp size={18} strokeWidth={1.75}/> : <ArrowDown size={18} strokeWidth={1.75}/>}</button></th><th>User</th><th>Entity</th><th>Action</th><th>Result</th><th>Reason / notes</th><th>Output summary</th></tr></thead><tbody>{items.map(entry => {
+          : <div className="table-wrap logs-table-wrap"><table className="logs-table"><thead><tr><th><button type="button" className="logs-sort" onClick={() => update({ sort_dir: query.sort_dir === "asc" ? "desc" : "asc" })}>Date / time {query.sort_dir === "asc" ? "↑" : "↓"}</button></th><th>User</th><th>Entity</th><th>Action</th><th>Result</th><th>Reason / notes</th><th>Output summary</th></tr></thead><tbody>{items.map(entry => {
             const userName = entry.created_by ? userNames[entry.created_by] || `User ${entry.created_by.slice(0, 8)}` : "System";
             const entity = entry.entity_type === "email_draft" ? "email draft" : entry.entity_type === "invoice_issue" ? "issue" : entry.entity_type;
             return <tr key={entry.id} tabIndex={0} onClick={() => void openEntry(entry)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openEntry(entry); } }} aria-label={`View ${friendly(entity)} ${friendly(entry.action)} log`}>
@@ -185,8 +202,8 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
           })}</tbody></table></div>}
       {!loading && total > 0 && <div className="pagination"><span>Page {query.page} of {totalPages} · {total.toLocaleString("en-IN")} records</span><div><Button variant="secondary" disabled={Number(query.page) <= 1} onClick={() => update({ page: String(Number(query.page) - 1) })}>Previous</Button><Button variant="secondary" disabled={Number(query.page) >= totalPages} onClick={() => update({ page: String(Number(query.page) + 1) })}>Next</Button></div></div>}
     </Card>
-    {selected && <div className="modal-backdrop logs-detail-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelected(null); }}><section className="modal logs-detail-panel" role="dialog" aria-modal="true" aria-labelledby="log-detail-title"><header className="modal-head"><div><span className="eyebrow">ACTIVITY DETAIL</span><h2 id="log-detail-title">{friendly(selected.action)}</h2></div><button className="modal-close" aria-label="Close log details" onClick={() => setSelected(null)}><X size={18} strokeWidth={1.75}/></button></header><div className="modal-body"><dl className="logs-detail-grid"><dt>Date / time</dt><dd>{stamp(selected.created_at)}</dd><dt>User</dt><dd>{selected.created_by ? userNames[selected.created_by] || `User ${selected.created_by.slice(0, 8)}` : "System"}</dd><dt>Entity</dt><dd>{friendly(selected.entity_type === "email_draft" ? "email draft" : selected.entity_type === "invoice_issue" ? "issue" : selected.entity_type)} · {selected.entity_id || "—"}</dd><dt>Result</dt><dd>{friendly(selected.result)}</dd><dt>Reason / notes</dt><dd>{reasonFor(selected)}</dd><dt>Output summary</dt><dd>{outputFor(selected.output_summary)}</dd></dl>
-        {selectedInvoiceId && <><div className="logs-timeline-heading"><h3>Invoice timeline</h3><div><Button variant="secondary" onClick={() => onOpenInvoice(selectedInvoiceId)}>Open invoice</Button> <Button variant="secondary" aria-expanded={showTimeline} onClick={() => setShowTimeline(value => !value)}>{showTimeline ? "Hide timeline" : "Show timeline"}</Button></div></div>{showTimeline && <InvoiceTimeline invoiceId={selectedInvoiceId} coreUrl={coreUrl} authHeaders={authHeaders}/>}</>}
+    {selected && <div className="modal-backdrop logs-detail-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelected(null); }}><section className="modal logs-detail-panel" role="dialog" aria-modal="true" aria-labelledby="log-detail-title"><header className="modal-head"><div><span className="eyebrow">ACTIVITY DETAIL</span><h2 id="log-detail-title">{friendly(selected.action)}</h2></div><button className="modal-close" aria-label="Close log details" onClick={() => setSelected(null)}>×</button></header><div className="modal-body"><dl className="logs-detail-grid"><dt>Date / time</dt><dd>{stamp(selected.created_at)}</dd><dt>User</dt><dd>{selected.created_by ? userNames[selected.created_by] || `User ${selected.created_by.slice(0, 8)}` : "System"}</dd><dt>Entity</dt><dd>{friendly(selected.entity_type === "email_draft" ? "email draft" : selected.entity_type === "invoice_issue" ? "issue" : selected.entity_type)} · {selected.entity_id || "—"}</dd><dt>Result</dt><dd>{friendly(selected.result)}</dd><dt>Reason / notes</dt><dd>{reasonFor(selected)}</dd><dt>Output summary</dt><dd>{outputFor(selected.output_summary)}</dd></dl>
+        {selectedInvoiceId && <><div className="logs-timeline-heading"><h3>Invoice timeline</h3><Button variant="secondary" onClick={() => onOpenInvoice(selectedInvoiceId)}>Open invoice</Button></div>{timelineError && <div className="notice error" role="alert">{timelineError}</div>}{timelineLoading ? <div className="logs-timeline-loading"><Skeleton/><Skeleton/><Skeleton/></div> : timeline.length ? <ol className="logs-timeline">{timeline.map(item => <li key={item.id}><span className={`logs-timeline-dot ${item.result || "success"}`} aria-hidden="true"/><div><strong>{friendly(item.kind === "state_change" ? item.new_value?.workflow_status as string : item.step_name || item.action)}</strong><time>{stamp(item.created_at)}</time><p>{item.kind === "state_change" && typeof item.new_value?.reason === "string" ? item.new_value.reason : "Activity recorded"}</p>{item.step_name && <small>{friendly(item.step_name)}{item.duration_ms != null ? ` · ${item.duration_ms} ms` : ""} · {outputFor(item.output_summary)}</small>}</div></li>)}</ol> : <p className="muted">No invoice timeline entries are available.</p>}</>}
       </div></section></div>}
   </div>;
 }

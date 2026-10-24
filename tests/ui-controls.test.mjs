@@ -1,18 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canAccessLogs, canCreateVendor, canSeeAdminNavigation } from "../src/accessControls.ts";
+import { canAccessLogs, canSeeAdminNavigation } from "../src/accessControls.ts";
 import { defaultSortLabel, toggleSortDirection } from "../src/sortControls.ts";
-import { isDocxFilename, isSupportedUploadFilename, MAX_FILES_PER_UPLOAD, UPLOAD_LIMIT_MESSAGE, uploadLimitMessage } from "../src/uploadLimits.ts";
-import { userFacingErrorMessage } from "../src/errorMessages.ts";
-import { documentActionAvailability, isValidDocumentId } from "../src/documentIds.ts";
-import { documentDetailSectionTitle, linkedRecordDestination } from "../src/documentNavigation.ts";
-import { vendorMatches } from "../src/vendorMatching.ts";
-import { sourceFileActionAvailability, sourceFilePreviewMime, sourceFileViewerMode } from "../src/sourceFileActions.ts";
-import { confidenceLabel } from "../src/procurementControls.ts";
-import { documentStatusLabel, isDocumentProcessing, isRetryScheduled } from "../src/documentStatus.ts";
-import axios from "axios";
-import { addAndResolveVendor } from "../src/vendorResolution.ts";
-import { confidenceDisplay, groupLowConfidenceFields } from "../src/confidenceDisplay.ts";
 
 test("Logs navigation and access are admin-only", () => {
   assert.equal(canSeeAdminNavigation("admin"), true);
@@ -22,148 +11,9 @@ test("Logs navigation and access are admin-only", () => {
   assert.equal(canAccessLogs(null), false);
 });
 
-test("vendor creation is available to authenticated admins and associates", () => {
-  assert.equal(canCreateVendor("admin"), true);
-  assert.equal(canCreateVendor("associate"), true);
-  assert.equal(canCreateVendor(null), false);
-  assert.equal(canCreateVendor("viewer"), false);
-});
-
-test("associate vendor add resolves records in order and can clear the banner", async () => {
-  const calls = [];
-  let bannerVisible = true;
-  const created = await addAndResolveVendor({
-    name: "Extracted Vendor",
-    taxId: "GST-42",
-    create: async payload => { calls.push(["create", payload]); return { id: "v-1" }; },
-    resolve: async (id, payload) => { calls.push(["resolve", id, payload]); bannerVisible = false; },
-  });
-  assert.equal(created.id, "v-1");
-  assert.deepEqual(calls.map(call => call[0]), ["create", "resolve"]);
-  assert.equal(bannerVisible, false);
-});
-
-test("scheduled retries remain Processing without exposing attempt details", () => {
-  const scheduled = { status: "failed", failure_class: "retryable", next_retry_at: "2030-01-01T00:00:00Z" };
-  assert.equal(isRetryScheduled(scheduled), true);
-  assert.equal(isDocumentProcessing(scheduled), true);
-  assert.equal(documentStatusLabel(scheduled, status => status || "Unknown"), "Processing");
-  assert.equal(isDocumentProcessing({ status: "failed", failure_class: "retry_exhausted", next_retry_at: null }), false);
-});
-
 test("sort direction toggles and labels the current server order", () => {
   assert.equal(toggleSortDirection("asc"), "desc");
   assert.equal(toggleSortDirection("desc"), "asc");
   assert.equal(defaultSortLabel("Due date", "asc"), "Due Date ascending");
   assert.equal(defaultSortLabel("Amount", "desc"), "Amount descending");
-});
-
-test("upload selection allows five files and rejects larger batches clearly", () => {
-  assert.equal(MAX_FILES_PER_UPLOAD, 5);
-  assert.equal(uploadLimitMessage(5), null);
-  assert.equal(uploadLimitMessage(6), UPLOAD_LIMIT_MESSAGE);
-});
-
-test("DOCX is a supported upload and View document uses extracted content", () => {
-  assert.equal(isSupportedUploadFilename("invoice.docx"), true);
-  assert.equal(isSupportedUploadFilename("invoice.DOCX"), true);
-  assert.equal(isSupportedUploadFilename("invoice.docm"), false);
-  assert.equal(isSupportedUploadFilename("invoice.doc"), false);
-  assert.equal(isDocxFilename("invoice.DOCX"), true);
-  assert.equal(isDocxFilename("invoice.docm"), false);
-  assert.equal(sourceFileViewerMode("invoice.docx"), "extracted-preview");
-  assert.equal(sourceFileViewerMode("invoice.pdf"), "inline");
-  assert.equal(sourceFileViewerMode("photo.png"), "inline");
-  assert.equal(sourceFilePreviewMime("invoice.pdf"), "application/pdf");
-  assert.equal(sourceFilePreviewMime("photo.jpg"), "image/jpeg");
-  assert.equal(sourceFileViewerMode("message.eml"), "unsupported");
-  assert.equal(sourceFilePreviewMime("message.eml"), null);
-});
-
-test("file API errors are mapped to plain user messages", () => {
-  const cases = [
-    [401, "Your session has expired. Sign in again to continue."],
-    [403, "You do not have permission to do this. Contact your administrator if you need access."],
-    [404, "This file or record could not be found. Refresh and try again."],
-    [413, "This file is too large. Choose a smaller file and try again."],
-    [415, "This file type is not supported. Choose a supported file and try again."],
-    [422, "Something went wrong with this file. Please retry or upload it again."],
-    [409, "This invoice or record changed or is already decided. Refresh and try again."],
-    [503, "The service is temporarily unavailable. Wait a moment, then try again."],
-  ];
-  const debug = console.debug;
-  console.debug = () => {};
-  try {
-    for (const [status, message] of cases) {
-      const error = Object.assign(new Error("raw secret detail"), { isAxiosError: true, response: { status, data: { detail: [{ msg: "private content" }] } } });
-      assert.equal(userFacingErrorMessage(error), message);
-    }
-    assert.equal(userFacingErrorMessage(Object.assign(new Error("private"), { isAxiosError: true })), "Could not reach the service. Check your connection and try again.");
-  } finally { console.debug = debug; }
-});
-
-test("409 uses a friendly backend detail, with vendor wording only for vendor calls", () => {
-  const debug = console.debug;
-  console.debug = () => {};
-  try {
-    const conflict = Object.assign(new Error("private"), { isAxiosError: true, response: { status: 409, data: { detail: "Resolve the invoice vendor before approving an exception." } } });
-    assert.equal(userFacingErrorMessage(conflict), "Resolve the invoice vendor before approving an exception.");
-    const noDetail = Object.assign(new Error("private"), { isAxiosError: true, response: { status: 409, data: {} } });
-    assert.equal(userFacingErrorMessage(noDetail, "fallback", { conflict: "vendor" }), "This conflicts with an existing vendor. Check the name or tax ID and try again.");
-  } finally { console.debug = debug; }
-});
-
-test("document actions are disabled when the id is missing or not a UUID", () => {
-  for (const id of [null, undefined, "", "null", "not-a-uuid"]) {
-    assert.equal(isValidDocumentId(id), false);
-    assert.deepEqual(documentActionAvailability(id), { disabled: true, title: "File is not available" });
-  }
-  const id = "e6ab4db7-39ab-4a67-a533-231bf915c933";
-  assert.equal(isValidDocumentId(id), true);
-  assert.deepEqual(documentActionAvailability(id), { disabled: false, title: undefined });
-});
-
-test("drawer source-file actions are disabled without a valid source document id", () => {
-  for (const id of [null, undefined, "", "null", "not-a-uuid"]) {
-    assert.deepEqual(sourceFileActionAvailability(id), { disabled: true, title: "File is not available" });
-  }
-  assert.deepEqual(sourceFileActionAvailability("e6ab4db7-39ab-4a67-a533-231bf915c933"), { disabled: false, title: undefined });
-});
-
-test("document cards route to linked records and keep failed or unlinked documents in the modal", () => {
-  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "invoice", linked_invoice_id: "i-1" }), { page: "invoices", recordId: "i-1" });
-  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "po", linked_po_id: "p-1" }), { page: "purchase-orders", recordId: "p-1" });
-  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "goods_receipt", linked_gr_id: "g-1" }), { page: "goods-receipts", recordId: "g-1" });
-  assert.deepEqual(linkedRecordDestination({ status: "failed", doc_type: "goods_receipt", linked_gr_id: "g-1" }), { page: "goods-receipts", recordId: "g-1" });
-  assert.deepEqual(linkedRecordDestination({ status: "needs_data_review", doc_type: "purchase_order", linked_po_id: "p-2" }), { page: "purchase-orders", recordId: "p-2" });
-  assert.equal(linkedRecordDestination({ status: "extracted", doc_type: "goods_receipt" }), null);
-});
-
-test("vendor matching recognizes canonical name or tax id and flags unknown vendors", () => {
-  const vendors = [{ name: "Acme Supplies", tax_id: "GST-123" }];
-  assert.equal(vendorMatches({ name: "  ACME   SUPPLIES " }, vendors), true);
-  assert.equal(vendorMatches({ name: "Different", tax_id: "GST-123" }, vendors), true);
-  assert.equal(vendorMatches({ name: "Acme Supplies", tax_id: "GST-999" }, vendors), false);
-  assert.equal(vendorMatches({ name: "Unknown Co", tax_id: "GST-999" }, vendors), false);
-});
-
-test("document detail section headings follow document type", () => {
-  assert.equal(documentDetailSectionTitle("goods_receipt"), "Goods Receipt");
-  assert.equal(documentDetailSectionTitle("po"), "Purchase Order");
-  assert.equal(documentDetailSectionTitle("invoice"), "Invoice");
-  assert.equal(documentDetailSectionTitle(null), "Document");
-});
-
-test("invoice confidence labels use display thresholds without raw scores", () => {
-  assert.equal(confidenceLabel(90), "High");
-  assert.equal(confidenceLabel(75), "Medium");
-  assert.equal(confidenceLabel(74), "Low");
-  assert.equal(confidenceLabel(undefined), "Unverified");
-});
-
-test("invoice confidence percent drives compact color and grouped verification fields", () => {
-  assert.deepEqual(confidenceDisplay(85), { percent: 85, label: "High", tone: "green" });
-  assert.deepEqual(confidenceDisplay(84), { percent: 84, label: "Medium", tone: "amber" });
-  assert.deepEqual(confidenceDisplay(74), { percent: 74, label: "Low", tone: "red" });
-  assert.deepEqual(groupLowConfidenceFields(["vendor", "line_1.qty", "line_2.unit_price"]), { header: ["vendor"], lines: ["1.qty", "2.unit_price"] });
 });

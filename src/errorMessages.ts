@@ -1,6 +1,7 @@
 import axios from "axios";
 
 type ErrorResponse = { status?: number; data?: { detail?: unknown } };
+type ErrorMessageOptions = { conflict?: "vendor" | "default" };
 
 function safeMetadata(error: unknown) {
   if (axios.isAxiosError(error)) {
@@ -9,7 +10,7 @@ function safeMetadata(error: unknown) {
   return { name: error instanceof Error ? error.name : typeof error };
 }
 
-export function userFacingErrorMessage(error: unknown, fallback = "The request could not be completed. Try again.") {
+export function userFacingErrorMessage(error: unknown, fallback = "The request could not be completed. Try again.", options: ErrorMessageOptions = {}) {
   console.debug("Request failed", safeMetadata(error));
   const response = axios.isAxiosError(error) ? error.response as ErrorResponse | undefined : undefined;
   if (!response) {
@@ -25,7 +26,13 @@ export function userFacingErrorMessage(error: unknown, fallback = "The request c
     case 415: return "This file type is not supported. Choose a supported file and try again.";
     case 422: return "Something went wrong with this file. Please retry or upload it again.";
     case 429: return "Too many requests. Wait a moment and try again.";
-    case 409: return "This conflicts with an existing record. Check the name or tax ID and try again.";
+    case 409: {
+      const detail = response.data?.detail;
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+      return options.conflict === "vendor"
+        ? "This conflicts with an existing vendor. Check the name or tax ID and try again."
+        : "This invoice or record changed or is already decided. Refresh and try again.";
+    }
     default: return (response.status || 0) >= 500
       ? "The service is temporarily unavailable. Wait a moment, then try again."
       : fallback;

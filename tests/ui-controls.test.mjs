@@ -72,7 +72,7 @@ test("file API errors are mapped to plain user messages", () => {
     [413, "This file is too large. Choose a smaller file and try again."],
     [415, "This file type is not supported. Choose a supported file and try again."],
     [422, "Something went wrong with this file. Please retry or upload it again."],
-    [409, "This conflicts with an existing record. Check the name or tax ID and try again."],
+    [409, "This invoice or record changed or is already decided. Refresh and try again."],
     [503, "The service is temporarily unavailable. Wait a moment, then try again."],
   ];
   const debug = console.debug;
@@ -83,6 +83,17 @@ test("file API errors are mapped to plain user messages", () => {
       assert.equal(userFacingErrorMessage(error), message);
     }
     assert.equal(userFacingErrorMessage(Object.assign(new Error("private"), { isAxiosError: true })), "Could not reach the service. Check your connection and try again.");
+  } finally { console.debug = debug; }
+});
+
+test("409 uses a friendly backend detail, with vendor wording only for vendor calls", () => {
+  const debug = console.debug;
+  console.debug = () => {};
+  try {
+    const conflict = Object.assign(new Error("private"), { isAxiosError: true, response: { status: 409, data: { detail: "Resolve the invoice vendor before approving an exception." } } });
+    assert.equal(userFacingErrorMessage(conflict), "Resolve the invoice vendor before approving an exception.");
+    const noDetail = Object.assign(new Error("private"), { isAxiosError: true, response: { status: 409, data: {} } });
+    assert.equal(userFacingErrorMessage(noDetail, "fallback", { conflict: "vendor" }), "This conflicts with an existing vendor. Check the name or tax ID and try again.");
   } finally { console.debug = debug; }
 });
 

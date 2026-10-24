@@ -72,7 +72,7 @@ type FilePreviewState =
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null; confidence_level?: "high" | "medium" | "low"; low_confidence_fields?: string[] };
 type ProcurementLine = { item_code?: string | null; description?: string | null; qty?: number | string | null; unit_price?: number | string | null; line_amount?: number | string | null; received_qty?: number | string | null; accepted_qty?: number | string | null; rejected_qty?: number | string | null };
-type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: ProcurementLine[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[]; match_outcome?: { outcome?: string; rule_set_version?: string; confidence_level?: string; confidence_levels?: Record<string, "high" | "medium" | "low">; low_confidence_fields?: string[]; discrepancies?: { code: string; message: string; invoice_value?: unknown; expected_value?: unknown; difference?: unknown; tolerance?: unknown; line_reference?: string | null; next_action?: string }[] } | null; match_checks?: { code: string; label: string; status: "pass" | "fail"; invoice_value?: unknown; expected_value?: unknown }[]; payment_status?: string; linked_purchase_order?: { id: string; po_number: string; vendor_name?: string | null; source_document_id?: string | null; po_date?: string | null; currency?: string | null; total_amount?: number | string | null; needs_verification?: boolean; lines: ProcurementLine[] } | null; linked_goods_receipts?: { id: string; gr_number: string; source_document_id?: string | null; receipt_date?: string | null; needs_verification?: boolean; lines: ProcurementLine[] }[]; confidence_level?: "high" | "medium" | "low" };
+type InvoiceDetail = InvoiceItem & { match_run_id?: string | null; updated_at?: string | null; vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: ProcurementLine[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[]; match_outcome?: { outcome?: string; rule_set_version?: string; confidence_level?: string; confidence_levels?: Record<string, "high" | "medium" | "low">; low_confidence_fields?: string[]; discrepancies?: { code: string; message: string; invoice_value?: unknown; expected_value?: unknown; difference?: unknown; tolerance?: unknown; line_reference?: string | null; next_action?: string }[] } | null; match_checks?: { code: string; label: string; status: "pass" | "fail"; invoice_value?: unknown; expected_value?: unknown }[]; payment_status?: string; linked_purchase_order?: { id: string; po_number: string; vendor_name?: string | null; source_document_id?: string | null; po_date?: string | null; currency?: string | null; total_amount?: number | string | null; needs_verification?: boolean; lines: ProcurementLine[] } | null; linked_goods_receipts?: { id: string; gr_number: string; source_document_id?: string | null; receipt_date?: string | null; needs_verification?: boolean; lines: ProcurementLine[] }[]; confidence_level?: "high" | "medium" | "low" };
 type NoMatchDraft = { id: string; status: string; kind: string };
 type EmailDraftDetail = NoMatchDraft & { subject: string; body: string; to_addresses: string[]; cc_addresses?: string[] };
 type EmailMessageItem = { id: string; sender?: string | null; subject?: string | null; status: string; filter_reason?: string | null; failure_reason?: string | null; received_at?: string | null; retryable: boolean; document_id?: string | null; linked_invoice_id?: string | null; linked_invoice_status?: string | null };
@@ -187,7 +187,7 @@ function App() {
   const [emailDraftBusy, setEmailDraftBusy] = useState(false);
   const [emailDraftError, setEmailDraftError] = useState("");
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
-  const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string } | null>(null);
+  const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string; expectedMatchRunId?: string | null; expectedUpdatedAt?: string | null } | null>(null);
   const [recentBatchIds, setRecentBatchIds] = useState<string[]>(() => {
     try {
       const saved = sessionStorage.getItem("ap-recent-upload-ids");
@@ -661,7 +661,7 @@ function App() {
       if (vendorMatches({ name: info.vendorName, tax_id: info.taxId }, response.data)) return;
       try { sessionStorage.setItem(key, "shown"); } catch { /* Session storage may be unavailable. */ }
       setUnknownVendor(info); setUnknownVendorError("");
-    } catch (error) { notify(getError(error, "Could not check the vendor directory."), "error"); }
+    } catch (error) { notify(getError(error, "Could not check the vendor directory.", { conflict: "vendor" }), "error"); }
   }
   async function addUnknownVendor(values: { name: string; tax_id: string }) {
     if (!unknownVendor || !values.name.trim()) return;
@@ -674,7 +674,7 @@ function App() {
       if (info.recordType === "invoice" && info.linkedId) await openInvoice(info.linkedId);
       if ((info.recordType === "purchase_order" || info.recordType === "goods_receipt") && info.linkedId) setProcurementRecordId(info.linkedId);
       await Promise.all([loadDocuments(1), loadInvoices()]);
-    } catch (error) { setUnknownVendorError(getError(error, "Could not add or match this vendor.")); }
+    } catch (error) { setUnknownVendorError(getError(error, "Could not add or match this vendor.", { conflict: "vendor" })); }
     finally { setUnknownVendorBusy(false); }
   }
 
@@ -751,7 +751,7 @@ function App() {
   async function submitInvoiceDecision(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!decision) return;
     try {
-      await axios.post(`${CORE_URL}/api/invoices/${decision.invoiceId}/${decision.action}`, { reason: decision.reason }, { headers: authHeaders() });
+      await axios.post(`${CORE_URL}/api/invoices/${decision.invoiceId}/${decision.action}`, { reason: decision.reason, ...(decision.expectedMatchRunId ? { expected_match_run_id: decision.expectedMatchRunId } : {}), ...(decision.expectedUpdatedAt ? { expected_updated_at: decision.expectedUpdatedAt } : {}) }, { headers: authHeaders() });
       notify("Invoice decision saved.", "success"); setDecision(null); setSelectedInvoice(null); await loadInvoices();
     } catch (error) { notify(getError(error, "Could not save the invoice decision."), "error"); }
   }
@@ -1031,7 +1031,7 @@ function App() {
           onReviewNoMatchDraft={() => void reviewNoMatchDraft()}
           onClose={() => setSelectedInvoice(null)}
           onMatch={(candidate, accept) => { void confirmSuggestedMatch(candidate, accept); }}
-          onDecision={action => { setDecision({ invoiceId: selectedInvoice.invoice_id, action, reason: "" }); }}
+          onDecision={action => { setDecision({ invoiceId: selectedInvoice.invoice_id, action, reason: "", expectedMatchRunId: selectedInvoice.match_run_id, expectedUpdatedAt: selectedInvoice.updated_at }); }}
         />
       </div>
     )}

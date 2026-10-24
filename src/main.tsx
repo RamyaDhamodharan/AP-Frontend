@@ -9,6 +9,7 @@ import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { LogsPage } from "./components/LogsPage";
 import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
+import { uploadLimitMessage } from "./uploadLimits";
 import "./styles/globals.css";
 import "./styles/modern.css";
 
@@ -171,7 +172,11 @@ function App() {
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
   const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string } | null>(null);
   const [recentBatchIds, setRecentBatchIds] = useState<string[]>(() => {
-    try { const saved = sessionStorage.getItem("ap-recent-upload-ids"); return saved ? JSON.parse(saved) as string[] : []; } catch { return []; }
+    try {
+      const saved = sessionStorage.getItem("ap-recent-upload-ids");
+      const parsed: unknown = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
   });
   const [docTotal, setDocTotal] = useState(0);
   const [docPage, setDocPage] = useState(1);
@@ -183,6 +188,7 @@ function App() {
   const [docError, setDocError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [isDraggingDocuments, setIsDraggingDocuments] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
@@ -271,20 +277,33 @@ function App() {
     if (!token) return;
     setDocLoading(true); setDocError("");
     try {
-      const query = new URLSearchParams({ page: String(nextPage), page_size: "50" });
-      if (docStatus !== "all" && !["processing", "ready"].includes(docStatus)) query.set("status", docStatus);
-      if (docType !== "all") query.set("doc_type", docType);
-      if (docSource === "email") query.set("source", "email");
-      else if (docSource === "latest") query.set("source", "upload");
-      const response = await axios.get<PageResponse<Doc> | Doc[]>(`${CORE_URL}/api/documents?${query}`, { headers: authHeaders() });
-      const data = response.data;
-      const items = Array.isArray(data) ? data : data.items || [];
-      const visibleItems = docSource === "latest" && recentBatchIds.length ? items.filter(item => recentBatchIds.includes(item.id)) : items;
-      setDocuments(visibleItems); setDocTotal(docSource === "latest" && recentBatchIds.length ? visibleItems.length : (Array.isArray(data) ? items.length : data.total ?? items.length));
-      setDocPage(Array.isArray(data) ? nextPage : data.page ?? nextPage);
+      const batchItems = docSource === "email" ? [] : await Promise.all(recentBatchIds.map(id =>
+        axios.get<Doc>(`${CORE_URL}/api/documents/${encodeURIComponent(id)}`, { headers: authHeaders() }).then(result => result.data),
+      ));
+      let visibleItems = batchItems;
+      let visibleTotal = batchItems.length;
+      if (docSource !== "latest") {
+        const query = new URLSearchParams({ page: String(nextPage), page_size: "50", source: "email" });
+        if (docStatus !== "all" && !["processing", "ready"].includes(docStatus)) query.set("status", docStatus);
+        if (docType !== "all") query.set("doc_type", docType);
+        const response = await axios.get<PageResponse<Doc> | Doc[]>(`${CORE_URL}/api/documents?${query}`, { headers: authHeaders() });
+        const data = response.data;
+        const items = Array.isArray(data) ? data : data.items || [];
+        visibleItems = items;
+        visibleTotal = Array.isArray(data) ? items.length : data.total ?? items.length;
+        if (docSource === "all") {
+          const emailIds = new Set(visibleItems.map(item => item.id));
+          visibleItems = [...batchItems.filter(item => !emailIds.has(item.id)), ...visibleItems];
+          visibleTotal += batchItems.filter(item => !emailIds.has(item.id)).length;
+        }
+        setDocPage(Array.isArray(data) ? nextPage : data.page ?? nextPage);
+      } else {
+        setDocPage(1);
+      }
+      setDocuments(visibleItems); setDocTotal(visibleTotal);
       setSelectedDoc(current => {
         const latest = current && visibleItems.find(item => item.id === current.id);
-        return latest && current ? { ...current, status: latest.status, updated_at: latest.updated_at, failure_message: latest.failure_message } : current;
+        return latest && current ? { ...current, status: latest.status, updated_at: latest.updated_at, failure_message: latest.failure_message, linked_invoice_id: latest.linked_invoice_id, linked_invoice_status: latest.linked_invoice_status } : current;
       });
     } catch (error) {
       const message = getError(error, "Could not load documents."); setDocError(message);
@@ -424,15 +443,19 @@ function App() {
   useEffect(() => { if (token && !profileLoading && !mustChangePassword) void loadDocuments(1); }, [token, profileLoading, mustChangePassword, docStatus, docType, docSource]);
   useEffect(() => {
     if (!token || profileLoading || mustChangePassword) return;
-    const running = documents.some(doc => isProcessing(doc.status))
-      || invoices.some(invoice => invoice.status === "processing")
+    const running = invoices.some(invoice => invoice.status === "processing")
       || emailMessages.some(message => ["processing", "received", "failed"].includes(message.status));
     if (!running) return;
     const timer = window.setInterval(() => {
-      void loadDocuments(docPage); void loadInvoices(); void loadEmailInbox();
+      void loadInvoices(); void loadEmailInbox();
     }, 15000);
     return () => window.clearInterval(timer);
-  }, [token, profileLoading, mustChangePassword, documents, invoices, emailMessages, docPage, loadDocuments, loadInvoices, loadEmailInbox]);
+  }, [token, profileLoading, mustChangePassword, invoices, emailMessages, loadInvoices, loadEmailInbox]);
+  useEffect(() => {
+    if (activePage !== "documents" || !documents.some(doc => isProcessing(doc.status))) return;
+    const timer = window.setInterval(() => { void loadDocuments(1); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activePage, documents, loadDocuments]);
   useEffect(() => { if (activePage === "associates" || activePage === "logs") void loadAssociates(); }, [activePage, loadAssociates]);
   useEffect(() => { if ((activePage === "invoices" || activePage === "dashboard") && token && !profileLoading && !mustChangePassword) void loadInvoices(); }, [activePage, token, profileLoading, mustChangePassword, loadInvoices]);
   useEffect(() => { if (activePage === "command-center" && token && !profileLoading && !mustChangePassword) void loadCommandCenter(); }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
@@ -532,13 +555,25 @@ function App() {
     } catch { notify("Could not access the clipboard. Select and copy the password manually.", "error"); }
   }
 
-  async function uploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
-    const chosen = Array.from(event.target.files || []); event.target.value = "";
+  async function uploadFiles(chosen: File[]) {
+    const limitMessage = uploadLimitMessage(chosen.length);
+    if (limitMessage) {
+      notify(limitMessage, "error");
+      return;
+    }
     if (!chosen.length) return;
+    if (uploading) {
+      notify("An upload is already in progress.", "info");
+      return;
+    }
     const tooLarge = chosen.filter(file => file.size > 20 * 1024 * 1024);
     const valid = chosen.filter(file => file.size <= 20 * 1024 * 1024);
     if (tooLarge.length) notify(`${tooLarge.map(file => file.name).join(", ")}: each file must be 20 MB or smaller.`, "error");
     if (!valid.length) return;
+    setDocSource("latest");
+    setRecentBatchIds([]);
+    try { sessionStorage.removeItem("ap-recent-upload-ids"); } catch { /* Browser storage may be disabled. */ }
+    setDocuments([]); setDocTotal(0); setDocPage(1); setSelectedDoc(null);
     setUploading(true); setUploadProgress(0);
     const outcomes: { name: string; ok: boolean; message?: string }[] = [];
     const batchDocs: Doc[] = [];
@@ -560,7 +595,7 @@ function App() {
     setUploading(false);
     const batchIds = batchDocs.map(doc => doc.id);
     setRecentBatchIds(batchIds);
-    sessionStorage.setItem("ap-recent-upload-ids", JSON.stringify(batchIds));
+    try { sessionStorage.setItem("ap-recent-upload-ids", JSON.stringify(batchIds)); } catch { /* Keep the batch in React state for this page session. */ }
     setDocuments(batchDocs); setDocTotal(batchDocs.length); setDocPage(1);
     const successes = outcomes.filter(item => item.ok).length;
     setModalError("");
@@ -572,6 +607,11 @@ function App() {
     setSelectedDoc(doc); setModalError(""); setDetailLoading(true);
     try {
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
+      if (response.data.linked_invoice_id) {
+        setSelectedDoc(null);
+        await openInvoice(response.data.linked_invoice_id);
+        return;
+      }
       setSelectedDoc(response.data);
     } catch (error) { setModalError(getError(error, "Could not load document details.")); }
     finally { setDetailLoading(false); }
@@ -770,12 +810,13 @@ function App() {
           {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts…"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
       </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "due_date", sort_dir: bucket === "overdue" ? "desc" : "asc" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
-        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={uploadFiles} disabled={uploading} hidden /></label></header>
+        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; void uploadFiles(files); }} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
           <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents… {uploadProgress}%</span></div>
           <div className="progress-track"><span style={{ width: `${uploadProgress}%` }}/></div>
         </div>}
-        <section className="panel simple-documents">
+        <section className={`panel simple-documents ${isDraggingDocuments ? "is-dragging" : ""}`} onDragOver={event => { event.preventDefault(); setIsDraggingDocuments(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingDocuments(false); }} onDrop={event => { event.preventDefault(); setIsDraggingDocuments(false); void uploadFiles(Array.from(event.dataTransfer.files)); }}>
+          <div className="document-drop-hint" aria-live="polite">Drop up to 5 files here, or use Upload documents.</div>
           <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><span className="count">{docTotal} files</span></div>
           <div className="toolbar simple-toolbar">
             <label className="search"><span>⌕</span><input value={docSearch} onChange={e => setDocSearch(e.target.value)} placeholder="Search documents…" /></label>
@@ -786,18 +827,16 @@ function App() {
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
           {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads…"/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
-              <div className="document-card-top"><span className="file-badge">{(doc.original_filename.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}</span><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span></div>
-              <div className="document-card-icon">▤</div>
-              <strong title={doc.original_filename}>{doc.original_filename}</strong>
-              <span className="document-card-type">{humanize(doc.doc_type || (doc.extracted_json?.document_type as string | undefined) || "Document")}</span>
-              <span className="document-source-badge">{doc.source === "email" ? "Email" : "Upload"}</span>
-              {doc.linked_invoice_id ? <button type="button" className="text-link document-card-invoice" onClick={event => { event.stopPropagation(); const invoice = invoices.find(item => item.invoice_id === doc.linked_invoice_id); if (invoice) void openInvoice(invoice.invoice_id); else setActivePage("invoices"); }}>View invoice · {doc.linked_invoice_status ? invoiceStatusLabels[doc.linked_invoice_status as InvoiceItem["status"]] || humanize(doc.linked_invoice_status) : "Linked"}</button> : <span className="document-card-reason">{doc.failure_message || "Invoice not created yet"}</span>}
-              <span className="document-card-date">Uploaded {dateLabel(doc.created_at)}</span>
-              <span className="document-card-preview">Preview details ↗</span>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => doc.linked_invoice_id ? void openInvoice(doc.linked_invoice_id) : void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); doc.linked_invoice_id ? void openInvoice(doc.linked_invoice_id) : void openDocument(doc); } }}>
+              <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
+              <div className="document-card-meta">
+                <span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span>
+                <span className="document-card-reason" title={doc.failure_message || undefined}>{doc.failure_message || (isProcessing(doc.status) ? "Processing. Status refreshes automatically." : doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>
+                {doc.status === "failed" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title="Retry processing" onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading}><RetryIcon/></button>}
+              </div>
             </article>)}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
-          </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "No documents uploaded yet"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
+          </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "Upload up to 5 bills to get started"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
         </section>
       </>}
       <footer className="footer"><span>GENWORX AP · DOCUMENT WORKSPACE</span><span>Statuses and decisions are provided by AP-Core.</span></footer>
@@ -807,7 +846,7 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}>×</button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}>×</button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}>↗ Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}>↻ Retry processing</button>}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}>↗ Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}>↻ Retry processing</button>}</div></div>}
     </section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
@@ -850,6 +889,15 @@ function displayDate(value: unknown) {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).format(parsed);
 }
+function FileTypeIcon({ filename }: { filename: string }) {
+  const imageFile = /\.(png|jpe?g|webp|tiff?)$/i.test(filename);
+  return <span className="document-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">{imageFile ? <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></> : <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></>}</svg></span>;
+}
+
+function RetryIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 17 5l3 2M4 17l3 2a7 7 0 0 0 11.4-4"/></svg>;
+}
+
 function DetailField({ label, value, verify = false }: { label: string; value?: unknown; verify?: boolean }) {
   if (value == null || value === "") return null;
   if (typeof value !== "string" && typeof value !== "number") return null;

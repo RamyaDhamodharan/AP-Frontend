@@ -194,7 +194,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .invoice-table tbody tr, .comparison-table tbody tr { position: relative; cursor: pointer; }
 .invoice-table tbody tr:hover td:first-child::before { position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--orange); content: ""; }
 .invoice-id, .file { display: flex; align-items: center; gap: 12px; min-width: 190px; }
-.invoice-icon, .file-badge, .document-card-icon, .attention-vendor-icon, .kpi-icon, .stat-icon, .dashboard-note-icon, .empty-icon { display: grid; place-items: center; border: 1px solid var(--border); border-radius: 0; background: var(--warm-white); color: var(--navy); }
+.invoice-icon, .file-badge, .attention-vendor-icon, .kpi-icon, .stat-icon, .dashboard-note-icon, .empty-icon { display: grid; place-items: center; border: 1px solid var(--border); border-radius: 0; background: var(--warm-white); color: var(--navy); }
 .invoice-icon { width: 36px; height: 36px; }
 .file-badge { width: 36px; height: 40px; flex: 0 0 36px; font: 600 10px/14px "Poppins", system-ui, sans-serif; }
 .file b, .invoice-id b { color: var(--navy); font: 600 14px/20px "Poppins", system-ui, sans-serif; }
@@ -246,13 +246,21 @@ tbody tr:last-child td { border-bottom: 0; }
 .attention-amount { color: var(--navy); font-weight: 700; text-align: right; }
 .dashboard-footer-note { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--text-secondary); font-size: 12px; }
 .dashboard-note-icon { width: 20px; height: 20px; }
-.document-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 4px 0 20px; }
-.document-card { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 16px; background: #fff; color: var(--navy); text-align: left; transition: transform var(--duration-micro) var(--ease-micro), border-color var(--duration-micro) var(--ease-micro); }
-.document-card-top { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; }
-.document-card-icon { width: 40px; height: 40px; }
-.document-card strong { overflow-wrap: anywhere; font: 600 14px/20px "Poppins", system-ui, sans-serif; }
-.document-card-type, .document-card-date, .document-card-preview { color: var(--text-secondary); font: 400 12px/16px "Lato", system-ui, sans-serif; }
-.document-card-preview, .document-invoice-link { color: var(--navy); font: 600 12px/16px "Poppins", system-ui, sans-serif; }
+.document-drop-hint { margin: 0 0 16px; padding: 8px 12px; border: 1px dashed var(--border); color: var(--text-secondary); font: 400 13px/20px "Lato", system-ui, sans-serif; text-align: center; }
+.simple-documents.is-dragging .document-drop-hint { border-color: var(--orange); background: var(--peach-light); color: var(--navy); }
+.document-card-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 4px 0 20px; }
+.document-card { position: relative; display: flex; min-width: 0; min-height: 88px; flex-direction: column; justify-content: space-between; gap: 8px; padding: 12px; background: #fff; color: var(--navy); text-align: left; cursor: pointer; transition: transform var(--duration-micro) var(--ease-micro), border-color var(--duration-micro) var(--ease-micro), background-color var(--duration-micro) var(--ease-micro); }
+.document-card:hover, .document-card:focus-visible { transform: translateY(-2px); border-color: var(--orange); background: var(--peach-light); }
+.document-card:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+.document-card-heading { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.document-card strong { min-width: 0; overflow: hidden; color: var(--navy); font: 600 13px/18px "Poppins", system-ui, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.document-card-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.document-card .pill { max-width: 45%; overflow: hidden; padding: 3px 8px; text-overflow: ellipsis; white-space: nowrap; }
+.document-file-icon { display: inline-grid; width: 24px; height: 24px; place-items: center; color: var(--navy); }
+.document-file-icon svg, .document-retry svg { display: block; width: 18px; height: 18px; }
+.document-retry { display: inline-grid; width: 24px; min-width: 24px; height: 24px; place-items: center; padding: 0; border: var(--line); background: var(--warm-white); color: var(--navy); }
+.document-retry:hover { border-color: var(--orange); background: var(--peach-light); }
+.document-retry:disabled { opacity: .5; cursor: not-allowed; }
 .simple-upload-inner { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; border: 1px dashed var(--navy); background: #fff; text-align: center; }
 .simple-upload-inner:hover, .simple-upload-inner:focus-within { border-color: var(--orange); }
 .upload-symbol { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid var(--border); color: var(--navy); }
@@ -411,9 +419,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .invoice-source-cell { min-width: 190px; max-width: 280px; }
 .invoice-source-cell span, .invoice-source-cell small { display: block; overflow-wrap: anywhere; }
 .invoice-source-cell small { margin-top: 4px; color: var(--text-secondary); font-size: 12px; }
-.document-source-badge { display: inline-flex; padding: 4px 8px; border: var(--line); color: var(--navy); font: 600 12px/16px "Poppins", system-ui, sans-serif; }
-.document-card-reason { color: var(--text-secondary); font: 400 12px/16px "Lato", system-ui, sans-serif; overflow-wrap: anywhere; }
+.document-card-reason { display: block; min-width: 0; flex: 1; overflow: hidden; color: var(--text-secondary); font: 400 12px/16px "Lato", system-ui, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .email-model-note { margin-top: 12px; }
+@media (max-width: 1199px) { .document-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 1050px) { .document-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .document-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .document-card-grid { grid-template-columns: 1fr; } }
 @media (max-width: 1050px) { .email-inbox-status { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .email-inbox-status { grid-template-columns: repeat(2, minmax(0, 1fr)); } .email-filter-row { align-items: stretch; flex-direction: column; } .email-filter-row .form-label { width: 100%; } }
 

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { createAuthSession } from "./authSession";
-import { Badge, Button, Card, Skeleton } from "./components/ui";
-import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceLevel, type ConfidenceResponse } from "./components/CommandCenter";
+import { Badge, Button, Card, Skeleton, Tabs } from "./components/ui";
+import { CommandCenter, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { LogsPage } from "./components/LogsPage";
@@ -13,6 +13,7 @@ import "./styles/modern.css";
 
 const AUTH_URL = String(import.meta.env.VITE_AUTH_API_BASE_URL || "http://localhost:8001").replace(/\/$/, "");
 const CORE_URL = String(import.meta.env.VITE_AP_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+const iconProps = { size: 18, strokeWidth: 1.75, "aria-hidden": true as const };
 
 declare module "axios" { interface InternalAxiosRequestConfig { authRetried?: boolean } }
 const authSession = createAuthSession(async () => {
@@ -38,13 +39,18 @@ axios.interceptors.response.use(undefined, async (error: AxiosError) => {
 });
 
 type Doc = {
-  id: string; original_filename: string; status: string; doc_type?: string | null;
+  id?: string | null; local_key?: string; original_filename: string; status: string; doc_type?: string | null;
   created_at?: string | null; updated_at?: string | null; failure_message?: string | null;
+  failure_class?: string | null; next_retry_at?: string | null;
   extracted_json?: Record<string, unknown> | null; raw_text?: string | null;
   source?: string | null; email_sender?: string | null; email_subject?: string | null;
   email_received_at?: string | null; linked_invoice_id?: string | null;
-  linked_invoice_status?: string | null;
+  linked_invoice_status?: string | null; linked_po_id?: string | null; linked_gr_id?: string | null;
 };
+type FilePreviewState =
+  | { kind: "loading"; filename: string }
+  | { kind: "binary"; filename: string; url: string; mime: string }
+  | { kind: "docx"; filename: string; document: Doc; fallback?: boolean };
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
 type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: { description?: string | null; item_code?: string | null; qty?: number | string | null; unit_price?: number | string | null; amount?: number | string | null }[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[] };
@@ -66,37 +72,26 @@ function readAccessClaims(token: string): AccessClaims | null {
   } catch { return null; }
 }
 
-function getError(error: unknown, fallback: string) {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") return JSON.stringify(detail);
-    if (!error.response) return `Cannot reach the API. Check that AP-Core/AP-Auth are running and the frontend API URLs are correct. (${error.message})`;
-    return error.message || fallback;
-  }
-  return fallback;
-}
+const getError = userFacingErrorMessage;
 function humanize(value?: string | null) {
   if (!value) return "Unknown";
   return value.replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase());
 }
-const processingStatuses = new Set(["uploaded", "queued", "received", "reading", "parsing", "processing", "classified", "matching"]);
 function friendlyStatus(value?: string | null) {
   const status = (value || "").toLowerCase();
   if (["needs_data_review", "needs_vendor_review"].includes(status)) return "Needs data review";
   if (status === "needs_attention") return "Needs attention";
-  if (processingStatuses.has(status)) return "Processing";
+  if (isProcessingStatus(status)) return "Processing";
   if (["ready", "extracted", "parsed", "processed"].includes(status)) return "Ready";
   if (status === "failed") return "Failed";
   return "Processing";
 }
-function isProcessing(value?: string | null) { return processingStatuses.has((value || "").toLowerCase()); }
 function statusClass(value?: string | null) {
   const s = (value || "unknown").toLowerCase();
   if (["failed", "rejected", "overdue", "match_issues", "no_match"].includes(s)) return "danger";
   if (["needs_data_review", "needs_vendor_review", "needs_attention"].includes(s)) return "warning";
   if (["approved", "paid", "match_approved", "processed", "extracted", "parsed", "ready_to_pay"].includes(s)) return "success";
-  if (processingStatuses.has(s) || ["verifying", "resubmitted", "on_hold"].includes(s)) return "pending";
+  if (isProcessingStatus(s) || ["verifying", "resubmitted", "on_hold"].includes(s)) return "pending";
   return "neutral";
 }
 function dateLabel(value?: string | null) {
@@ -105,7 +100,7 @@ function dateLabel(value?: string | null) {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(date);
 }
 function dateTimeLabel(value?: string | null) {
-  if (!value) return "—";
+  if (!value) return "â€”";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
 }
@@ -146,6 +141,9 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; kind: "success" | "error" | "info" } | null>(null);
   const [documents, setDocuments] = useState<Doc[]>([]);
+  const [bulkReprocessBusy, setBulkReprocessBusy] = useState(false);
+  const [bulkReprocessProgress, setBulkReprocessProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
+  const [localFailedDocuments, setLocalFailedDocuments] = useState<Doc[]>([]);
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
   const [invoiceCounts, setInvoiceCounts] = useState<Record<InvoiceItem["status"], number>>({ processing: 0, needs_review: 0, ready_to_pay: 0, on_hold: 0, rejected: 0 });
   const [invoiceLoading, setInvoiceLoading] = useState(false);
@@ -168,9 +166,13 @@ function App() {
   const [emailDraftBusy, setEmailDraftBusy] = useState(false);
   const [emailDraftError, setEmailDraftError] = useState("");
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
-  const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string } | null>(null);
+  const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string; expectedMatchRunId?: string | null; expectedUpdatedAt?: string | null } | null>(null);
   const [recentBatchIds, setRecentBatchIds] = useState<string[]>(() => {
-    try { const saved = sessionStorage.getItem("ap-recent-upload-ids"); return saved ? JSON.parse(saved) as string[] : []; } catch { return []; }
+    try {
+      const saved = sessionStorage.getItem("ap-recent-upload-ids");
+      const parsed: unknown = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
   });
   const [docTotal, setDocTotal] = useState(0);
   const [docPage, setDocPage] = useState(1);
@@ -182,7 +184,24 @@ function App() {
   const [docError, setDocError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [isDraggingDocuments, setIsDraggingDocuments] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  const [unknownVendor, setUnknownVendor] = useState<UnknownVendorInfo | null>(null);
+  const [unknownVendorBusy, setUnknownVendorBusy] = useState(false);
+  const [unknownVendorError, setUnknownVendorError] = useState("");
+  const [filePreview, setFilePreview] = useState<FilePreviewState | null>(null);
+  const filePreviewRequestId = useRef(0);
+  useEffect(() => {
+    if (!filePreview) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeFilePreview();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      if (filePreview.kind === "binary") URL.revokeObjectURL(filePreview.url);
+    };
+  }, [filePreview]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
@@ -199,7 +218,7 @@ function App() {
   const [commandTotal, setCommandTotal] = useState(0);
   const [commandLoading, setCommandLoading] = useState(false);
   const [commandError, setCommandError] = useState("");
-  const [commandConfidences, setCommandConfidences] = useState<Record<string, ConfidenceLevel>>({});
+  const [commandConfidences, setCommandConfidences] = useState<Record<string, number>>({});
   const [filterVendors, setFilterVendors] = useState<FilterVendor[]>([]);
   const [filterOwners, setFilterOwners] = useState<FilterOwner[]>([]);
   const [commandAction, setCommandAction] = useState<{ bill: CommandBill; action: string } | null>(null);
@@ -270,26 +289,39 @@ function App() {
     if (!token) return;
     setDocLoading(true); setDocError("");
     try {
-      const query = new URLSearchParams({ page: String(nextPage), page_size: "50" });
-      if (docStatus !== "all" && !["processing", "ready"].includes(docStatus)) query.set("status", docStatus);
-      if (docType !== "all") query.set("doc_type", docType);
-      if (docSource === "email") query.set("source", "email");
-      else if (docSource === "latest") query.set("source", "upload");
-      const response = await axios.get<PageResponse<Doc> | Doc[]>(`${CORE_URL}/api/documents?${query}`, { headers: authHeaders() });
-      const data = response.data;
-      const items = Array.isArray(data) ? data : data.items || [];
-      const visibleItems = docSource === "latest" && recentBatchIds.length ? items.filter(item => recentBatchIds.includes(item.id)) : items;
-      setDocuments(visibleItems); setDocTotal(docSource === "latest" && recentBatchIds.length ? visibleItems.length : (Array.isArray(data) ? items.length : data.total ?? items.length));
-      setDocPage(Array.isArray(data) ? nextPage : data.page ?? nextPage);
+      const batchItems = docSource === "email" ? [] : await Promise.all(recentBatchIds.filter(isValidDocumentId).map(id =>
+        axios.get<Doc>(`${CORE_URL}/api/documents/${encodeURIComponent(id)}`, { headers: authHeaders() }).then(result => result.data),
+      ));
+      let visibleItems = docSource === "latest" ? [...batchItems, ...localFailedDocuments] : batchItems;
+      let visibleTotal = batchItems.length;
+      if (docSource !== "latest") {
+        const query = new URLSearchParams({ page: String(nextPage), page_size: "50", source: "email" });
+        if (docStatus !== "all" && !["processing", "ready"].includes(docStatus)) query.set("status", docStatus);
+        if (docType !== "all") query.set("doc_type", docType);
+        const response = await axios.get<PageResponse<Doc> | Doc[]>(`${CORE_URL}/api/documents?${query}`, { headers: authHeaders() });
+        const data = response.data;
+        const items = Array.isArray(data) ? data : data.items || [];
+        visibleItems = items;
+        visibleTotal = Array.isArray(data) ? items.length : data.total ?? items.length;
+        if (docSource === "all") {
+          const emailIds = new Set(visibleItems.map(item => item.id));
+          visibleItems = [...batchItems.filter(item => !emailIds.has(item.id)), ...visibleItems];
+          visibleTotal += batchItems.filter(item => !emailIds.has(item.id)).length;
+        }
+        setDocPage(Array.isArray(data) ? nextPage : data.page ?? nextPage);
+      } else {
+        setDocPage(1);
+      }
+      setDocuments(visibleItems); setDocTotal(visibleTotal);
       setSelectedDoc(current => {
         const latest = current && visibleItems.find(item => item.id === current.id);
-        return latest && current ? { ...current, status: latest.status, updated_at: latest.updated_at, failure_message: latest.failure_message } : current;
+        return latest && current ? { ...current, status: latest.status, updated_at: latest.updated_at, failure_message: latest.failure_message, linked_invoice_id: latest.linked_invoice_id, linked_invoice_status: latest.linked_invoice_status } : current;
       });
     } catch (error) {
       const message = getError(error, "Could not load documents."); setDocError(message);
       if (axios.isAxiosError(error) && error.response?.status === 401) { clearSession(); notify("Your session expired. Please sign in again.", "error"); }
     } finally { setDocLoading(false); }
-  }, [token, docPage, docStatus, docType, docSource, authHeaders, clearSession, notify, recentBatchIds]);
+  }, [token, docPage, docStatus, docType, docSource, authHeaders, clearSession, notify, recentBatchIds, localFailedDocuments]);
 
   const loadAssociates = useCallback(async () => {
     if (!token || profile?.role !== "admin") return;
@@ -367,16 +399,16 @@ function App() {
         axios.get<{ items: CommandBill[]; total: number; page: number; page_size: number }>(`${CORE_URL}/api/command-center/bills?${query}`, { headers: authHeaders() }),
       ]);
       const allBuckets = summaryResponse.data.buckets || {};
-      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
+      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, needs_review: allBuckets.needs_review, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
       const items = listResponse.data.items || [];
       setCommandBills(items);
       setCommandTotal(listResponse.data.total || 0);
       const verified = await Promise.allSettled(items.map(bill => axios.get<ConfidenceResponse>(`${CORE_URL}/api/invoices/${bill.invoice_id}/verification`, { headers: authHeaders() })));
-      const nextConfidence: Record<string, ConfidenceLevel> = {};
-      verified.forEach((result, index) => { if (result.status === "fulfilled") nextConfidence[items[index].invoice_id] = confidenceLevel(result.value.data); });
+      const nextConfidence: Record<string, number> = {};
+      verified.forEach((result, index) => { if (result.status === "fulfilled") nextConfidence[items[index].invoice_id] = Number((result.value.data as ConfidenceResponse & { overall_confidence_percent?: number }).overall_confidence_percent ?? 0); });
       setCommandConfidences(nextConfidence);
     } catch (error) {
-      const message = axios.isAxiosError(error) && error.response?.status === 403 ? "You do not have permission to view the Command Center." : getError(error, "Could not load the Command Center.");
+      const message = getError(error, "Could not load the Command Center.");
       setCommandError(message);
     } finally { setCommandLoading(false); }
   }, [token, authHeaders, invoiceQuery]);
@@ -423,12 +455,11 @@ function App() {
   useEffect(() => { if (token && !profileLoading && !mustChangePassword) void loadDocuments(1); }, [token, profileLoading, mustChangePassword, docStatus, docType, docSource]);
   useEffect(() => {
     if (!token || profileLoading || mustChangePassword) return;
-    const running = documents.some(doc => isProcessing(doc.status))
-      || invoices.some(invoice => invoice.status === "processing")
+    const running = invoices.some(invoice => invoice.status === "processing")
       || emailMessages.some(message => ["processing", "received", "failed"].includes(message.status));
     if (!running) return;
     const timer = window.setInterval(() => {
-      void loadDocuments(docPage); void loadInvoices(); void loadEmailInbox();
+      void loadInvoices(); void loadEmailInbox();
     }, 15000);
     return () => window.clearInterval(timer);
   }, [token, profileLoading, mustChangePassword, documents, invoices, emailMessages, docPage, loadDocuments, loadInvoices, loadEmailInbox]);
@@ -531,16 +562,39 @@ function App() {
     } catch { notify("Could not access the clipboard. Select and copy the password manually.", "error"); }
   }
 
-  async function uploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
-    const chosen = Array.from(event.target.files || []); event.target.value = "";
+  async function uploadFiles(chosen: File[]) {
+    const limitMessage = uploadLimitMessage(chosen.length);
+    if (limitMessage) {
+      notify(limitMessage, "error");
+      return;
+    }
     if (!chosen.length) return;
+    if (uploading) {
+      notify("An upload is already in progress.", "info");
+      return;
+    }
     const tooLarge = chosen.filter(file => file.size > 20 * 1024 * 1024);
-    const valid = chosen.filter(file => file.size <= 20 * 1024 * 1024);
+    const sizeValid = chosen.filter(file => file.size <= 20 * 1024 * 1024);
     if (tooLarge.length) notify(`${tooLarge.map(file => file.name).join(", ")}: each file must be 20 MB or smaller.`, "error");
-    if (!valid.length) return;
-    setUploading(true); setUploadProgress(0);
+    const valid: File[] = [];
+    const rejectedDocs: Doc[] = [];
     const outcomes: { name: string; ok: boolean; message?: string }[] = [];
-    const batchDocs: Doc[] = [];
+    for (const file of sizeValid) {
+      if (isSupportedUploadFilename(file.name)) valid.push(file);
+      else {
+        const reason = "This file type is not supported. Upload a PDF, PNG, JPG, DOCX or EML file.";
+        rejectedDocs.push({ id: null, local_key: `rejected-${Date.now()}-${rejectedDocs.length}`, original_filename: file.name, status: "failed", failure_message: reason });
+        outcomes.push({ name: file.name, ok: false, message: reason });
+      }
+    }
+    if (!valid.length && !rejectedDocs.length) return;
+    setDocSource("latest");
+    setRecentBatchIds([]);
+    setLocalFailedDocuments([]);
+    try { sessionStorage.removeItem("ap-recent-upload-ids"); } catch { /* Browser storage may be disabled. */ }
+    setDocuments(rejectedDocs); setDocTotal(rejectedDocs.length); setDocPage(1); setSelectedDoc(null);
+    setUploading(true); setUploadProgress(0);
+    const batchDocs: Doc[] = [...rejectedDocs];
     for (let index = 0; index < valid.length; index++) {
       const file = valid[index];
       try {
@@ -552,26 +606,85 @@ function App() {
         });
         const result = response.data;
         if (result.status === "duplicate_blocked") outcomes.push({ name: file.name, ok: false, message: "Already uploaded (duplicate)" });
-        else { batchDocs.push(result); outcomes.push({ name: result.original_filename || file.name, ok: true, message: friendlyStatus(result.status || "received") }); }
+        else if (result.status === "failed" || !isValidDocumentId(result.id)) {
+          const message = "Something went wrong with this file. Please retry or upload it again.";
+          batchDocs.push({ ...result, id: null, local_key: `rejected-${Date.now()}-${index}`, original_filename: result.original_filename || file.name, status: "failed", failure_message: message });
+          outcomes.push({ name: result.original_filename || file.name, ok: false, message });
+        } else { batchDocs.push(result); outcomes.push({ name: result.original_filename || file.name, ok: true, message: friendlyStatus(result.status || "received") }); }
       } catch (error) { outcomes.push({ name: file.name, ok: false, message: getError(error, "Upload failed") }); }
-      setUploadProgress(Math.round(((index + 1) / valid.length) * 100));
+      setUploadProgress(Math.round(((index + 1) / Math.max(valid.length, 1)) * 100));
     }
     setUploading(false);
-    const batchIds = batchDocs.map(doc => doc.id);
+    const batchIds = batchDocs.map(doc => doc.id).filter(isValidDocumentId);
     setRecentBatchIds(batchIds);
-    sessionStorage.setItem("ap-recent-upload-ids", JSON.stringify(batchIds));
+    try { sessionStorage.setItem("ap-recent-upload-ids", JSON.stringify(batchIds)); } catch { /* Keep the batch in React state for this page session. */ }
     setDocuments(batchDocs); setDocTotal(batchDocs.length); setDocPage(1);
+    setLocalFailedDocuments(batchDocs.filter(doc => !isValidDocumentId(doc.id)));
     const successes = outcomes.filter(item => item.ok).length;
     setModalError("");
     setUploadResult({ outcomes, successes, total: valid.length });
   }
   const [uploadResult, setUploadResult] = useState<{ outcomes: { name: string; ok: boolean; message?: string }[]; successes: number; total: number } | null>(null);
 
+  async function checkUnknownVendor(info: UnknownVendorInfo) {
+    if (!info.vendorName.trim() && !info.taxId.trim()) return;
+    const key = `ap-unknown-vendor:${info.recordType}:${info.recordId}`;
+    let alreadyShown = false;
+    try { alreadyShown = Boolean(sessionStorage.getItem(key)); } catch { /* Continue without session storage. */ }
+    try {
+      const response = await axios.get<{ status: string; vendor?: { id: string; name: string }; candidates?: { id: string; name: string }[] }>(`${CORE_URL}/api/vendors/resolve-extracted`, { params: { name: info.vendorName || undefined, tax_id: info.taxId || undefined }, headers: authHeaders() });
+      if (response.data.status === "resolved") { setUnknownVendor(current => current?.recordId === info.recordId ? null : current); return; }
+      if (alreadyShown) return;
+      try { sessionStorage.setItem(key, "shown"); } catch { /* Session storage may be unavailable. */ }
+      setUnknownVendor({ ...info, suggestedVendors: response.data.candidates || [] }); setUnknownVendorError("");
+    } catch (error) { notify(getError(error, "Could not check the vendor directory.", { conflict: "vendor" }), "error"); }
+  }
+  async function addUnknownVendor(values: { name: string; tax_id: string }) {
+    if (!unknownVendor || !values.name.trim()) return;
+    setUnknownVendorBusy(true); setUnknownVendorError("");
+    try {
+      const info = unknownVendor;
+      const created = await addAndResolveVendor({ name: values.name, taxId: values.tax_id, create: async payload => (await axios.post<{ id: string }>(`${CORE_URL}/api/vendors`, payload, { headers: authHeaders() })).data, resolve: async (vendorId, payload) => { await axios.post(`${CORE_URL}/api/vendors/${vendorId}/resolve-extracted`, payload, { headers: authHeaders() }); } });
+      setUnknownVendor(null); notify("Vendor added. Matching has been requested.", "success");
+      if (info.recordType === "invoice" && info.linkedId) await openInvoice(info.linkedId);
+      if ((info.recordType === "purchase_order" || info.recordType === "goods_receipt") && info.linkedId) setProcurementRecordId(info.linkedId);
+      await Promise.all([loadDocuments(1), loadInvoices()]);
+    } catch (error) { setUnknownVendorError(getError(error, "Could not add or match this vendor.", { conflict: "vendor" })); }
+    finally { setUnknownVendorBusy(false); }
+  }
+  async function selectExistingVendor(vendorId: string) {
+    if (!unknownVendor || !vendorId) return;
+    setUnknownVendorBusy(true); setUnknownVendorError("");
+    try {
+      const info = unknownVendor;
+      await axios.post(`${CORE_URL}/api/vendors/${vendorId}/resolve-extracted`, { name: info.vendorName, tax_id: info.taxId || null, create_alias: true }, { headers: authHeaders() });
+      setUnknownVendor(null); notify("Vendor linked. Matching has been requested.", "success");
+      if (info.recordType === "invoice" && info.linkedId) await openInvoice(info.linkedId);
+      if ((info.recordType === "purchase_order" || info.recordType === "goods_receipt") && info.linkedId) setProcurementRecordId(info.linkedId);
+      await Promise.all([loadDocuments(1), loadInvoices()]);
+    } catch (error) { setUnknownVendorError(getError(error, "Could not link this vendor.", { conflict: "vendor" })); }
+    finally { setUnknownVendorBusy(false); }
+  }
+
   async function openDocument(doc: Doc) {
     setSelectedDoc(doc); setModalError(""); setDetailLoading(true);
     try {
+      if (!isValidDocumentId(doc.id)) return;
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
-      setSelectedDoc(response.data);
+      const detail = response.data;
+      const extracted = detail.extracted_json || {};
+      void checkUnknownVendor({ recordId: detail.linked_invoice_id || detail.linked_po_id || detail.linked_gr_id || detail.id!, recordType: detail.linked_invoice_id ? "invoice" : detail.linked_po_id ? "purchase_order" : detail.linked_gr_id ? "goods_receipt" : "document", docType: detail.doc_type, linkedId: detail.linked_invoice_id || detail.linked_po_id || detail.linked_gr_id, sourceDocumentId: detail.id, status: detail.status, vendorName: String(extracted.vendor || extracted.vendor_name || ""), taxId: String(extracted.vendor_tax_id || extracted.tax_id || ""), filename: detail.original_filename });
+      const destination = linkedRecordDestination(detail);
+      if (destination?.page === "invoices") {
+        setSelectedDoc(null);
+        setActivePage("invoices");
+        await openInvoice(destination.recordId, "details");
+        return;
+      }
+      if (destination?.page === "purchase-orders" || destination?.page === "goods-receipts") {
+        setSelectedDoc(null); setProcurementRecordId(destination.recordId); setActivePage(destination.page); return;
+      }
+      setSelectedDoc(detail);
     } catch (error) { setModalError(getError(error, "Could not load document details.")); }
     finally { setDetailLoading(false); }
   }
@@ -620,7 +733,7 @@ function App() {
   async function submitInvoiceDecision(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!decision) return;
     try {
-      await axios.post(`${CORE_URL}/api/invoices/${decision.invoiceId}/${decision.action}`, { reason: decision.reason }, { headers: authHeaders() });
+      await axios.post(`${CORE_URL}/api/invoices/${decision.invoiceId}/${decision.action}`, { reason: decision.reason, ...(decision.expectedMatchRunId ? { expected_match_run_id: decision.expectedMatchRunId } : {}), ...(decision.expectedUpdatedAt ? { expected_updated_at: decision.expectedUpdatedAt } : {}) }, { headers: authHeaders() });
       notify("Invoice decision saved.", "success"); setDecision(null); setSelectedInvoice(null); await loadInvoices();
     } catch (error) { notify(getError(error, "Could not save the invoice decision."), "error"); }
   }
@@ -632,15 +745,72 @@ function App() {
       await openInvoice(selectedInvoice.invoice_id); await loadInvoices();
     } catch (error) { notify(getError(error, "Could not update the suggested match."), "error"); }
   }
+  function closeFilePreview() {
+    filePreviewRequestId.current += 1;
+    setFilePreview(null);
+  }
   async function openOriginalFile(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
+    const viewerMode = sourceFileViewerMode(doc.original_filename);
+    if (viewerMode === "unsupported") {
+      notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
+      return;
+    }
+    const isDocx = viewerMode === "extracted-preview";
+    const requestId = ++filePreviewRequestId.current;
+    setFilePreview({ kind: "loading", filename: doc.original_filename });
     try {
-      const response = await axios.get(`${CORE_URL}/api/documents/${doc.id}/file`, { headers: authHeaders(), responseType: "blob" });
-      const url = URL.createObjectURL(response.data); const tab = window.open(url, "_blank", "noopener,noreferrer");
-      if (!tab) { const link = document.createElement("a"); link.href = url; link.download = doc.original_filename; link.click(); }
+      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/${isDocx ? "preview" : "file"}`, {
+        ...(isDocx ? {} : { params: { disposition: "inline" } }), headers: authHeaders(), responseType: "blob",
+      });
+      const mime = isDocx ? "application/pdf" : sourceFilePreviewMime(doc.original_filename);
+      if (!mime) {
+        setFilePreview(null);
+        notify("This file cannot be previewed in the browser. Use Download to open it.", "info");
+        return;
+      }
+      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
+      if (requestId !== filePreviewRequestId.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      setFilePreview({ kind: "binary", url, mime, filename: doc.original_filename });
+    } catch (error) {
+      if (requestId === filePreviewRequestId.current) {
+        if (isDocx) {
+          setFilePreview({ kind: "docx", filename: doc.original_filename, document: doc, fallback: true });
+        } else {
+          setFilePreview(null);
+          notify(getError(error, "Could not open the original file."), "error");
+        }
+      }
+    }
+  }
+  async function downloadOriginalFile(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
+    try {
+      const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
+        params: { disposition: "attachment" }, headers: authHeaders(), responseType: "blob",
+      });
+      const contentType = response.headers["content-type"];
+      const mime = (typeof contentType === "string" ? contentType : "") || response.data.type || "application/octet-stream";
+      const url = URL.createObjectURL(new Blob([response.data], { type: mime }));
+      const link = document.createElement("a");
+      link.href = url; link.download = doc.original_filename; link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) { notify(getError(error, "Could not download the original file."), "error"); }
+  }
+  async function openOriginalSource(sourceDocumentId: string | null | undefined, download = false) {
+    if (!isValidDocumentId(sourceDocumentId)) return;
+    try {
+      const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${sourceDocumentId}`, { headers: authHeaders() });
+      const source = { ...response.data, id: sourceDocumentId };
+      if (download) await downloadOriginalFile(source);
+      else await openOriginalFile(source);
     } catch (error) { notify(getError(error, "Could not open the original file."), "error"); }
   }
   async function retryDocument(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
     try {
       setDetailLoading(true);
       const endpoint = doc.status === "received" ? "parse" : "retry";
@@ -649,6 +819,32 @@ function App() {
       await loadDocuments(1);
     } catch (error) { notify(getError(error, "Could not retry document processing."), "error"); }
     finally { setDetailLoading(false); }
+  }
+  async function reprocessAllDocuments() {
+    if (profile?.role !== "admin" || bulkReprocessBusy) return;
+    if (!window.confirm("Reprocess up to five eligible documents at a time? This will run the current processing code on documents marked for review or retry.")) return;
+    setBulkReprocessBusy(true);
+    setBulkReprocessProgress({ done: 0, total: 0, failed: 0 });
+    let done = 0;
+    let total = 0;
+    let failed = 0;
+    try {
+      while (true) {
+        const response = await axios.post<{ scanned: number; completed: number; failed: number; remaining: number }>(`${CORE_URL}/api/documents/admin/reprocess-all`, {}, { headers: authHeaders() });
+        const batch = response.data;
+        done += batch.completed;
+        failed += batch.failed;
+        total = Math.max(total, done + batch.remaining);
+        setBulkReprocessProgress({ done, total, failed });
+        await loadDocuments(1);
+        if (batch.remaining <= 0 || batch.scanned === 0) break;
+      }
+      notify(`Reprocessing finished: ${done} documents handled, ${failed} failed.`, failed ? "error" : "success");
+    } catch (error) {
+      notify(getError(error, "Could not reprocess the documents."), "error");
+    } finally {
+      setBulkReprocessBusy(false);
+    }
   }
   async function pollEmailNow() {
     setEmailBusy(true);
@@ -699,15 +895,7 @@ function App() {
       setCommandAction(null);
       await Promise.all([loadCommandCenter(), loadInvoices()]);
     } catch (error) {
-      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined;
-      const detailRecord = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
-      const serverMessage = typeof detail === "string" ? detail : typeof detailRecord?.message === "string" ? detailRecord.message : typeof detailRecord?.detail === "string" ? detailRecord.detail : undefined;
-      const message = axios.isAxiosError(error) && error.response?.status === 403
-        ? `You do not have permission to perform this action.${typeof serverMessage === "string" ? ` ${serverMessage}` : ""}`
-        : typeof serverMessage === "string" ? serverMessage
-          : axios.isAxiosError(error) && error.response ? `Could not ${action} this invoice. (HTTP ${error.response.status})`
-            : getError(error, `Could not ${action} this invoice.`);
-      notify(message, "error");
+      notify(getError(error, `Could not ${action} this invoice.`), "error");
     } finally { setCommandActionBusy(false); }
   }
 
@@ -716,24 +904,40 @@ function App() {
     const actualType = String(doc.doc_type || (doc.extracted_json?.document_type as string | undefined) || "").toLowerCase();
     const matchesSearch = !q || [doc.original_filename, doc.id, actualType, doc.email_sender].some(value => String(value || "").toLowerCase().includes(q));
     const matchesType = docType === "all" || actualType === docType;
-    const matchesStatus = docStatus === "all" || (docStatus === "processing" ? isProcessing(doc.status) : docStatus === "ready" ? ["parsed", "extracted", "processed"].includes(doc.status.toLowerCase()) : doc.status === docStatus);
+    const matchesStatus = docStatus === "all" || (docStatus === "processing" ? isDocumentProcessing(doc) : docStatus === "ready" ? ["parsed", "extracted", "processed"].includes(doc.status.toLowerCase()) : doc.status === docStatus);
     return matchesSearch && matchesType && matchesStatus;
   }), [documents, docSearch, globalSearch, docType, docStatus]);
-  const docCounts = useMemo(() => ({ processing: documents.filter(d => ["received", "reading", "parsing", "parsed", "classified", "matching"].includes(d.status)).length, completed: documents.filter(d => ["extracted", "processed", "match_approved", "approved"].includes(d.status)).length, attention: documents.filter(d => ["failed", "needs_data_review", "needs_vendor_review", "incomplete", "match_issues"].includes(d.status)).length }), [documents]);
+  const docCounts = useMemo(() => ({ processing: documents.filter(isDocumentProcessing).length, completed: documents.filter(d => ["extracted", "processed", "match_approved", "approved"].includes(d.status)).length, attention: documents.filter(d => ["failed", "needs_data_review", "needs_vendor_review", "incomplete", "match_issues"].includes(d.status)).length }), [documents]);
 
-  if (restoring && !token) return <main className="session-screen"><Loader title="Restoring secure session" subtitle="Checking your sign-in session…" /></main>;
+  function navigateTo(page: WorkspacePage) {
+    setActivePage(page);
+    setMobileNavOpen(false);
+    if (page === "command-center" && activePage !== "command-center") updateInvoiceQuery({ status: "" });
+    if (page === "invoices" && activePage !== "invoices" && invoiceQuery.status && !invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) updateInvoiceQuery({ status: "" });
+  }
+
+  async function checkProcurementVendor(kind: "purchase_order" | "goods_receipt", row: { id: string; source_document_id?: string | null; vendor_name?: string | null }, purchaseOrder?: { vendor_name?: string | null }) {
+    let source: Doc | null = null;
+    if (row.source_document_id && isValidDocumentId(row.source_document_id)) {
+      try { source = (await axios.get<Doc>(`${CORE_URL}/api/documents/${row.source_document_id}`, { headers: authHeaders() })).data; } catch { /* Keep the procurement drawer usable without source details. */ }
+    }
+    const extracted = source?.extracted_json || {};
+    void checkUnknownVendor({ recordId: row.id, recordType: kind, linkedId: row.id, linkedPoId: kind === "goods_receipt" ? (purchaseOrder as { id?: string } | undefined)?.id : undefined, sourceDocumentId: row.source_document_id, docType: source?.doc_type, status: source?.status, vendorName: String(extracted.vendor || extracted.vendor_name || row.vendor_name || purchaseOrder?.vendor_name || ""), taxId: String(extracted.vendor_tax_id || extracted.tax_id || ""), filename: source?.original_filename || "" });
+  }
+
+  if (restoring && !token) return <main className="session-screen"><Loader title="Restoring secure session" subtitle="Checking your sign-in sessionâ€¦" /></main>;
   if (!token) return <main className="auth-shell page-enter">
-    <section className="auth-hero"><div className="brand brand-light"><span className="brand-mark">G</span><span>GENWORX<small>FINANCE AUTOMATION</small></span></div><div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE WORKSPACE</span><h1>Clarity for every<br /><em>invoice and document.</em></h1><p>Bring your documents together, track invoice progress, and spot issues without losing sight of the source evidence.</p><div className="hero-points"><span>✓ Secure workspace</span><span>✓ Clear processing status</span><span>✓ Human-reviewed decisions</span></div></div><div className="hero-orbit"><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="orbit-file">▤</div><span className="orbit-dot dot-one"/><span className="orbit-dot dot-two"/><span className="orbit-dot dot-three"/></div></section>
+    <section className="auth-hero"><div className="brand brand-light"><span className="brand-mark">G</span><span>GENWORX<small>FINANCE AUTOMATION</small></span></div><div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE WORKSPACE</span><h1>Clarity for every<br /><em>invoice and document.</em></h1><p>Bring your documents together, track invoice progress, and spot issues without losing sight of the source evidence.</p><div className="hero-points"><span><Check {...iconProps}/> Secure workspace</span><span><Check {...iconProps}/> Clear processing status</span><span><Check {...iconProps}/> Human-reviewed decisions</span></div></div><div className="hero-orbit"><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="orbit-file"><FileText {...iconProps}/></div><span className="orbit-dot dot-one"/><span className="orbit-dot dot-two"/><span className="orbit-dot dot-three"/></div></section>
     <section className="auth-side"><form className="auth-card" onSubmit={submitAuth}><span className="eyebrow purple">WELCOME TO GENWORX</span><h2>Sign in to your workspace</h2><p className="muted">Use the work email and password provided by your administrator.</p>
       <label className="form-label">Work email<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@company.com" /></label>
       <label className="form-label">Password<span className="password-control"><input type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} minLength={1} required placeholder="Enter your password" /><button type="button" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? "Hide" : "Show"}</button></span></label>
       {loginError && <div className="login-error" role="alert">{loginError}</div>}
-      <button className="primary full" disabled={authBusy}>{authBusy ? <><span className="mini-spin"/> Please wait…</> : "Sign in →"}</button>
-      <p className="security-note"><span>●</span> Your session is handled securely by GenWorx Auth.</p></form></section>
+      <button className="primary full" disabled={authBusy}>{authBusy ? <><span className="mini-spin"/> Please waitâ€¦</> : <>Sign in <ArrowRight {...iconProps}/></>}</button>
+      <p className="security-note"><span>â—</span> Your session is handled securely by GenWorx Auth.</p></form></section>
   </main>;
 
-  if (profileLoading) return <main className="session-screen"><Loader title="Loading your workspace" subtitle="Checking your account permissions…" /></main>;
-  if (mustChangePassword) return <main className="session-screen page-enter"><form className="auth-card" onSubmit={submitPasswordChange}><span className="eyebrow purple">SECURE YOUR ACCOUNT</span><h2>Change your temporary password</h2><p className="muted">Your administrator issued a temporary password. Set a new password before continuing. Use at least 12 characters with an uppercase letter, lowercase letter, number, and symbol.</p>{profile?.temp_password_expires_at && <p className="muted">Temporary password expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(profile.temp_password_expires_at))}.</p>}<label className="form-label">Temporary password<span className="password-control"><input type={showCurrentPassword ? "text" : "password"} autoComplete="current-password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} required /><button type="button" aria-label={showCurrentPassword ? "Hide temporary password" : "Show temporary password"} onClick={() => setShowCurrentPassword(value => !value)}>{showCurrentPassword ? "Hide" : "Show"}</button></span></label><label className="form-label">New password<span className="password-control"><input type={showNewPassword ? "text" : "password"} autoComplete="new-password" value={newPassword} onChange={e => setNewPassword(e.target.value)} minLength={12} maxLength={128} required /><button type="button" aria-label={showNewPassword ? "Hide new password" : "Show new password"} onClick={() => setShowNewPassword(value => !value)}>{showNewPassword ? "Hide" : "Show"}</button></span></label><label className="form-label">Confirm new password<span className="password-control"><input type={showConfirmPassword ? "text" : "password"} autoComplete="new-password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required /><button type="button" aria-label={showConfirmPassword ? "Hide confirmation" : "Show confirmation"} onClick={() => setShowConfirmPassword(value => !value)}>{showConfirmPassword ? "Hide" : "Show"}</button></span></label><button className="primary full" disabled={authBusy}>{authBusy ? "Saving…" : "Change password and continue"}</button><button className="secondary full" type="button" onClick={() => void logout()} disabled={authBusy}>Sign out</button></form></main>;
+  if (profileLoading) return <main className="session-screen"><Loader title="Loading your workspace" subtitle="Checking your account permissionsâ€¦" /></main>;
+  if (mustChangePassword) return <main className="session-screen page-enter"><form className="auth-card" onSubmit={submitPasswordChange}><span className="eyebrow purple">SECURE YOUR ACCOUNT</span><h2>Change your temporary password</h2><p className="muted">Your administrator issued a temporary password. Set a new password before continuing. Use at least 12 characters with an uppercase letter, lowercase letter, number, and symbol.</p>{profile?.temp_password_expires_at && <p className="muted">Temporary password expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(profile.temp_password_expires_at))}.</p>}<label className="form-label">Temporary password<span className="password-control"><input type={showCurrentPassword ? "text" : "password"} autoComplete="current-password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} required /><button type="button" aria-label={showCurrentPassword ? "Hide temporary password" : "Show temporary password"} onClick={() => setShowCurrentPassword(value => !value)}>{showCurrentPassword ? "Hide" : "Show"}</button></span></label><label className="form-label">New password<span className="password-control"><input type={showNewPassword ? "text" : "password"} autoComplete="new-password" value={newPassword} onChange={e => setNewPassword(e.target.value)} minLength={12} maxLength={128} required /><button type="button" aria-label={showNewPassword ? "Hide new password" : "Show new password"} onClick={() => setShowNewPassword(value => !value)}>{showNewPassword ? "Hide" : "Show"}</button></span></label><label className="form-label">Confirm new password<span className="password-control"><input type={showConfirmPassword ? "text" : "password"} autoComplete="new-password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required /><button type="button" aria-label={showConfirmPassword ? "Hide confirmation" : "Show confirmation"} onClick={() => setShowConfirmPassword(value => !value)}>{showConfirmPassword ? "Hide" : "Show"}</button></span></label><button className="primary full" disabled={authBusy}>{authBusy ? "Savingâ€¦" : "Change password and continue"}</button><button className="secondary full" type="button" onClick={() => void logout()} disabled={authBusy}>Sign out</button></form></main>;
 
   return <div className="app-shell">
     <aside className={mobileNavOpen ? "sidebar sidebar-open" : "sidebar"}>
@@ -759,65 +963,77 @@ function App() {
             <label className="form-label">Name<input value={associateName} onChange={e => setAssociateName(e.target.value)} minLength={2} maxLength={150} required /></label>
             <label className="form-label">Email<input type="email" value={associateEmail} onChange={e => setAssociateEmail(e.target.value)} required /></label>
             <label className="form-label">Temporary password (optional)<input type="password" value={temporaryPassword} onChange={e => setTemporaryPassword(e.target.value)} minLength={12} maxLength={128} /></label>
-            <button className="primary" disabled={authBusy}>{authBusy ? "Creating…" : "Add associate"}</button>
+            <button className="primary" disabled={authBusy}>{authBusy ? "Creatingâ€¦" : "Add associate"}</button>
           </form>
         </section>
         <section className="panel">
           <div className="panel-head"><div><h2>Associates</h2><p className="muted">Active associate accounts</p></div><span className="count">{associates.filter(item => item.is_active).length} people</span></div>
-          <div className="toolbar"><button className="secondary" onClick={() => void loadAssociates()} disabled={associatesLoading}>{associatesLoading ? "Loading…" : "Refresh list"}</button></div>
+          <div className="toolbar"><button className="secondary" onClick={() => void loadAssociates()} disabled={associatesLoading}>{associatesLoading ? "Loadingâ€¦" : "Refresh list"}</button></div>
           {associatesError && <div className="notice error">{associatesError}<button onClick={() => void loadAssociates()}>Try again</button></div>}
-          {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts…"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
+          {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accountsâ€¦"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
       </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "due_date", sort_dir: bucket === "overdue" ? "desc" : "asc" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
         <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={uploadFiles} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
-          <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents… {uploadProgress}%</span></div>
+          <div className="compact-upload-status"><DocumentLoader/><span>Uploading documentsâ€¦ {uploadProgress}%</span></div>
           <div className="progress-track"><span style={{ width: `${uploadProgress}%` }}/></div>
         </div>}
-        <section className="panel simple-documents">
-          <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><span className="count">{docTotal} files</span></div>
+        <section className={`panel simple-documents ${isDraggingDocuments ? "is-dragging" : ""}`} onDragOver={event => { event.preventDefault(); setIsDraggingDocuments(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingDocuments(false); }} onDrop={event => { event.preventDefault(); setIsDraggingDocuments(false); void uploadFiles(Array.from(event.dataTransfer.files)); }}>
+          <div className="document-drop-hint" aria-live="polite">Drop up to 5 files here, or use Upload documents.</div>
+          <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><div className="panel-head-actions">{profile?.role === "admin" && <button className="secondary" onClick={() => void reprocessAllDocuments()} disabled={bulkReprocessBusy}>{bulkReprocessBusy ? "Reprocessingâ€¦" : "Reprocess all"}</button>}<span className="count">{docTotal} files</span></div></div>
+          {bulkReprocessProgress && <div className="notice info" role="status">{bulkReprocessBusy ? "Reprocessing" : "Reprocessed"} {bulkReprocessProgress.done} of {bulkReprocessProgress.total} documents{bulkReprocessProgress.failed ? ` Â· ${bulkReprocessProgress.failed} failed` : ""}</div>}
           <div className="toolbar simple-toolbar">
-            <label className="search"><span>⌕</span><input value={docSearch} onChange={e => setDocSearch(e.target.value)} placeholder="Search documents…" /></label>
+            <label className="search"><Search {...iconProps}/><input value={docSearch} onChange={e => setDocSearch(e.target.value)} placeholder="Search documentsâ€¦" /></label>
             <select value={docSource} onChange={e => { setDocPage(1); setDocSource(e.target.value as "latest" | "all" | "email"); }} aria-label="Filter documents by source"><option value="latest">Latest upload</option><option value="email">Email</option><option value="all">All</option></select>
             <select value={docType} onChange={e => { setDocPage(1); setDocType(e.target.value); }} aria-label="Filter by document type"><option value="all">All types</option><option value="invoice">Invoices</option><option value="po">Purchase orders</option><option value="goods_receipt">Goods receipts</option><option value="other">Other</option></select>
             <select value={docStatus} onChange={e => { setDocPage(1); setDocStatus(e.target.value); }} aria-label="Filter by document status"><option value="all">All statuses</option><option value="processing">Processing</option><option value="ready">Ready</option><option value="failed">Failed</option><option value="ignored">Ignored</option></select>
-            <button className="icon-button" onClick={() => void loadDocuments(docPage)} disabled={docLoading} aria-label="Refresh documents">↻</button>
+            <button className="icon-button" onClick={() => void loadDocuments(docPage)} disabled={docLoading} aria-label="Refresh documents"><RefreshCw {...iconProps}/></button>
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
-          {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads…"/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
-              <div className="document-card-top"><span className="file-badge">{(doc.original_filename.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}</span><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span></div>
-              <div className="document-card-icon">▤</div>
-              <strong title={doc.original_filename}>{doc.original_filename}</strong>
-              <span className="document-card-type">{humanize(doc.doc_type || (doc.extracted_json?.document_type as string | undefined) || "Document")}</span>
-              <span className="document-source-badge">{doc.source === "email" ? "Email" : "Upload"}</span>
-              {doc.linked_invoice_id ? <button type="button" className="text-link document-card-invoice" onClick={event => { event.stopPropagation(); const invoice = invoices.find(item => item.invoice_id === doc.linked_invoice_id); if (invoice) void openInvoice(invoice.invoice_id); else setActivePage("invoices"); }}>View invoice · {doc.linked_invoice_status ? invoiceStatusLabels[doc.linked_invoice_status as InvoiceItem["status"]] || humanize(doc.linked_invoice_status) : "Linked"}</button> : <span className="document-card-reason">{doc.failure_message || "Invoice not created yet"}</span>}
-              <span className="document-card-date">Uploaded {dateLabel(doc.created_at)}</span>
-              <span className="document-card-preview">Preview details ↗</span>
-            </article>)}</div>
+          {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploadsâ€¦"/> : filteredDocs.length ? <>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => { const actionState = documentActionAvailability(doc.id); return <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id || doc.local_key || `${doc.original_filename}-${index}`} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
+              <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
+              <div className="document-card-status"><span className={`pill ${statusClass(isDocumentProcessing(doc) ? "processing" : doc.status)}`}><i/>{documentStatusLabel(doc, friendlyStatus)}</span>
+                {doc.status === "failed" && !isRetryScheduled(doc) && doc.failure_class !== "permanent" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
+              </div>
+              <span className="document-card-reason" title={isDocumentProcessing(doc) ? undefined : (doc.failure_message || undefined)}>{isDocumentProcessing(doc) ? "Processing. Status refreshes automatically." : doc.failure_message || (doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>{doc.status === "needs_vendor_review" && <button type="button" className="text-link" onClick={event => { event.stopPropagation(); void openDocument(doc); }}>Add vendor</button>}
+            </article>; })}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
-          </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "No documents uploaded yet"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
+          </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "Upload up to 5 bills to get started"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
         </section>
       </>}
-      <footer className="footer"><span>GENWORX AP · DOCUMENT WORKSPACE</span><span>Statuses and decisions are provided by AP-Core.</span></footer>
+      <footer className="footer"><span>GENWORX AP Â· DOCUMENT WORKSPACE</span><span>Statuses and decisions are provided by AP-Core.</span></footer>
       </div>
     </main>
-    {toast && <div className={`toast ${toast.kind}`} role="status"><span className="toast-symbol">{toast.kind === "success" ? "✓" : toast.kind === "error" ? "!" : "i"}</span><span>{toast.text}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
-    {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}>×</button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
-    {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}>×</button></header>
-      {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}>↗ Open original file</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}>↻ Retry processing</button>}</div></div>}
+    {toast && <div className={`toast ${toast.kind}`} role="status"><span className="toast-symbol">{toast.kind === "success" ? <CircleCheck {...iconProps}/> : toast.kind === "error" ? <CircleAlert {...iconProps}/> : <CircleHelp {...iconProps}/>}</span><span>{toast.text}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X {...iconProps}/></button></div>}
+    {unknownVendor && <UnknownVendorPrompt info={unknownVendor} vendors={filterVendors} canAddVendor={canCreateVendor(profile?.role)} busy={unknownVendorBusy} error={unknownVendorError} onAdd={values => void addUnknownVendor(values)} onSelectExisting={vendorId => void selectExistingVendor(vendorId)} onClose={() => setUnknownVendor(null)}/>}
+    {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
+    {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
+      {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest informationâ€¦"/> : modalError && <div className="notice error">{modalError}</div>}
+    {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(isDocumentProcessing(selectedDoc) ? "processing" : selectedDoc.status)}`}><i/>{documentStatusLabel(selectedDoc, friendlyStatus)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{unknownVendor && unknownVendor.sourceDocumentId === selectedDoc.id && <VendorResolutionBanner info={unknownVendor} vendors={filterVendors} canAddVendor={canCreateVendor(profile?.role)} busy={unknownVendorBusy} error={unknownVendorError} onAdd={() => { if (unknownVendor) setUnknownVendor(unknownVendor); }} onSelect={vendorId => void selectExistingVendor(vendorId)}/>} {isDocumentProcessing(selectedDoc) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}><Eye {...iconProps}/> View document</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && !isRetryScheduled(selectedDoc) && (selectedDoc.status.toLowerCase() !== "failed" || selectedDoc.failure_class !== "permanent") && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
+    {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) closeFilePreview(); }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><div><h2 id="file-preview-title">{filePreview.filename}</h2>{filePreview.kind === "docx" && <p className="muted">{filePreview.fallback ? "Preview unavailable, showing extracted text" : "Preview of extracted content"}</p>}</div><button className="modal-close" aria-label="Close file preview" onClick={closeFilePreview}><X {...iconProps}/></button></header>{filePreview.kind === "loading" ? <div className="file-preview-loading" role="status" aria-live="polite"><span className="spinner"/> Loading document preview...</div> : filePreview.kind === "docx" ? <DocxExtractedPreview doc={filePreview.document}/> : filePreview.mime.startsWith("image/") ? <div className="file-preview-content"><img alt={`Preview of ${filePreview.filename}`} src={filePreview.url}/></div> : <iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/>}</section></div>}
     {selectedInvoice && (
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer
           invoice={selectedInvoice}
+          initialTab={invoiceDrawerTab}
+          authHeaders={authHeaders}
+          onViewOriginal={id => void openOriginalSource(id)}
+          onDownloadOriginal={id => void openOriginalSource(id, true)}
           candidates={matchCandidates}
           noMatchDraft={noMatchDraft}
           onReviewNoMatchDraft={() => void reviewNoMatchDraft()}
           onClose={() => setSelectedInvoice(null)}
           onMatch={(candidate, accept) => { void confirmSuggestedMatch(candidate, accept); }}
-          onDecision={action => { setDecision({ invoiceId: selectedInvoice.invoice_id, action, reason: "" }); }}
+          onDecision={action => { setDecision({ invoiceId: selectedInvoice.invoice_id, action, reason: "", expectedMatchRunId: selectedInvoice.match_run_id, expectedUpdatedAt: selectedInvoice.updated_at }); }}
+          vendorNotice={unknownVendor?.recordType === "invoice" && unknownVendor.recordId === selectedInvoice.invoice_id ? unknownVendor : null}
+          vendorVendors={filterVendors}
+          canAddVendor={canCreateVendor(profile?.role)}
+          vendorBusy={unknownVendorBusy}
+          vendorError={unknownVendorError}
+          onAddVendor={() => { if (unknownVendor) setUnknownVendor(unknownVendor); }}
+          onSelectVendor={vendorId => void selectExistingVendor(vendorId)}
         />
       </div>
     )}
@@ -828,30 +1044,27 @@ function App() {
 }
 function Loader({ title, subtitle }: { title: string; subtitle: string }) { return <div className="loader-screen"><DocumentLoader/><h2>{title}</h2><p>{subtitle}</p></div>; }
 function DocumentLoader() { return <span className="document-loader" aria-hidden="true"><span className="loader-orbit orbit-a"/><span className="loader-orbit orbit-b"/><span className="loader-paper"><i/><i/><i/></span><span className="loader-point point-a"/><span className="loader-point point-b"/></span>; }
-function LoadingPanel({ title, subtitle }: { title: string; subtitle: string }) { return <div className="loading-panel" role="status"><div className="skeleton-copy"><Skeleton/><Skeleton/><span><b>{title}</b> · {subtitle}</span></div><div className="skeleton-lines"><Skeleton/><Skeleton/><Skeleton/></div></div>; }
-function EmptyState({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) { return <div className="empty"><div className="empty-icon">▤</div><h3>{title}</h3><p>{description}</p>{action}</div>; }
+function LoadingPanel({ title, subtitle }: { title: string; subtitle: string }) { return <div className="loading-panel" role="status"><div className="skeleton-copy"><Skeleton/><Skeleton/><span><b>{title}</b> Â· {subtitle}</span></div><div className="skeleton-lines"><Skeleton/><Skeleton/><Skeleton/></div></div>; }
+function EmptyState({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) { return <div className="empty"><div className="empty-icon"><FileText {...iconProps}/></div><h3>{title}</h3><p>{description}</p>{action}</div>; }
 type AnyRecord = Record<string, unknown>;
 function record(value: unknown): AnyRecord { return value && typeof value === "object" && !Array.isArray(value) ? value as AnyRecord : {}; }
 function pick(data: AnyRecord, keys: string[]) { for (const key of keys) { const value = data[key]; if (value !== null && value !== undefined && value !== "" && typeof value !== "object") return value; } return undefined; }
-function confidenceFor(data: AnyRecord, keys: string[]) {
-  const confidence = record(data.field_confidence || data.confidence);
-  for (const key of keys) {
-    const entry = confidence[key];
-    const raw = typeof entry === "object" && entry !== null ? record(entry).confidence ?? record(entry).score : entry;
-    const number = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
-    if (Number.isFinite(number)) return number < 1 ? number * 100 < 80 : number < 80;
-  }
-  return false;
-}
 function displayDate(value: unknown) {
   if (typeof value !== "string" && typeof value !== "number") return value;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).format(parsed);
 }
-function DetailField({ label, value, verify = false }: { label: string; value?: unknown; verify?: boolean }) {
+function FileTypeIcon({ filename }: { filename: string }) {
+  const imageFile = /\.(png|jpe?g|webp|tiff?)$/i.test(filename);
+  return <span className="document-file-icon" aria-hidden="true">{imageFile ? <FileImage {...iconProps}/> : <FileText {...iconProps}/>}</span>;
+}
+
+function RetryIcon() { return <RotateCcw {...iconProps}/>; }
+
+function DetailField({ label, value }: { label: string; value?: unknown }) {
   if (value == null || value === "") return null;
   if (typeof value !== "string" && typeof value !== "number") return null;
-  return <div className="field"><span>{label}</span><strong>{String(value)}{verify && <small className="verify-warning" title="Please verify" aria-label="Please verify"> ⚠ Please verify</small>}</strong></div>;
+  return <div className="field"><span>{label}</span><strong>{String(value)}</strong></div>;
 }
 const invoiceFields: { label: string; keys: string[]; date?: boolean }[] = [
   { label: "Vendor", keys: ["vendor", "vendor_name", "supplier", "supplier_name"] },
@@ -865,7 +1078,7 @@ const invoiceFields: { label: string; keys: string[]; date?: boolean }[] = [
 ];
 function DocumentExtractedDetails({ doc }: { doc: Doc }) {
   const data = record(doc.extracted_json);
-  const nested = record(data.invoice);
+  const nested = doc.doc_type === "invoice" ? record(data.invoice) : {};
   const source = { ...data, ...nested };
   const currencyValue = pick(source, ["currency", "currency_code"]);
   const currency = typeof currencyValue === "string" && /^[A-Za-z]{3}$/.test(currencyValue) ? currencyValue.toUpperCase() : "";
@@ -881,7 +1094,6 @@ function DocumentExtractedDetails({ doc }: { doc: Doc }) {
     const amount = Number(value);
     return Number.isFinite(amount) ? new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(amount) : String(value);
   };
-  const confidenceKeys = (keys: string[]) => keys;
   const linesValue = pick(source, ["line_items", "items"]);
   const lines = Array.isArray(linesValue) ? linesValue.map(record) : [];
   const amountFields = [
@@ -889,27 +1101,71 @@ function DocumentExtractedDetails({ doc }: { doc: Doc }) {
     { label: "Tax", keys: ["tax", "tax_amount", "total_tax"] },
     { label: "Total", keys: ["total", "total_amount", "invoice_total", "grand_total"] },
   ];
-  const invoicePresent = invoiceFields.some(field => pick(source, field.keys) !== undefined);
+  const documentFields = doc.doc_type === "po" || doc.doc_type === "purchase_order"
+    ? [{ label: "PO Number", keys: ["po_number", "order_number"] }, { label: "PO Date", keys: ["po_date"], date: true }, { label: "Vendor", keys: ["vendor", "vendor_name"] }, { label: "Payment Terms", keys: ["payment_terms", "terms"] }]
+    : doc.doc_type === "goods_receipt"
+      ? [{ label: "Receipt Number", keys: ["gr_number", "receipt_number", "goods_receipt_number"] }, { label: "Receipt Date", keys: ["receipt_date"], date: true }, { label: "PO Number", keys: ["po_number", "order_number"] }, { label: "Vendor", keys: ["vendor", "vendor_name"] }]
+      : doc.doc_type === "invoice" ? invoiceFields : [];
+  const sectionTitle = documentDetailSectionTitle(doc.doc_type);
+  const ownFieldsPresent = documentFields.some(field => pick(source, field.keys) !== undefined);
   return <div className="extracted-details">
-    {invoicePresent && <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{invoiceFields.map(field => {
+    {ownFieldsPresent && <section className="extracted-section"><h3 className="section-title">{sectionTitle}</h3><div className="field-grid">{documentFields.map(field => {
       const value = pick(source, field.keys);
-      return <DetailField key={field.label} label={field.label} value={field.date ? displayDate(value) : value} verify={value !== undefined && confidenceFor(source, confidenceKeys(field.keys))}/>;
+      return <DetailField key={field.label} label={field.label} value={field.date ? displayDate(value) : value}/>;
     })}</div></section>}
     {amountFields.some(field => pick(source, field.keys) !== undefined) && <section className="extracted-section"><h3 className="section-title">Amounts</h3><div className="field-grid">{amountFields.map(field => {
       const value = pick(source, field.keys);
-      return <DetailField key={field.label} label={field.label} value={formatAmount(value)} verify={value !== undefined && confidenceFor(source, field.keys)}/>;
+      return <DetailField key={field.label} label={field.label} value={formatAmount(value)}/>;
     })}</div></section>}
     {lines.length > 0 && <section className="extracted-section"><h3 className="section-title">Line Items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{lines.map((line, index) => {
       const description = pick(line, ["description", "item_description", "name"]);
       const quantity = pick(line, ["qty", "quantity"]);
       const price = pick(line, ["unit_price", "price"]);
       const amount = pick(line, ["amount", "line_amount", "line_total", "total"]);
-      return <tr key={index}><td>{description == null ? "" : String(description)}{description != null && confidenceFor(line, ["description", "item_description"]) && <small className="verify-warning"> ⚠ Please verify</small>}</td><td>{formatQuantity(quantity) || ""}{quantity != null && confidenceFor(line, ["qty", "quantity"]) && <small className="verify-warning"> ⚠ Please verify</small>}</td><td>{formatAmount(price) || ""}{price != null && confidenceFor(line, ["unit_price"]) && <small className="verify-warning"> ⚠ Please verify</small>}</td><td>{formatAmount(amount) || ""}{amount != null && confidenceFor(line, ["amount", "line_amount", "line_total"]) && <small className="verify-warning"> ⚠ Please verify</small>}</td></tr>;
+      return <tr key={index}><td>{description == null ? "" : String(description)}</td><td>{formatQuantity(quantity) || ""}</td><td>{formatAmount(price) || ""}</td><td>{formatAmount(amount) || ""}</td></tr>;
     })}</tbody></table></div></section>}
-    {!invoicePresent && !amountFields.some(field => pick(source, field.keys) !== undefined) && !lines.length && <p className="muted">No invoice details are available yet.</p>}
+    {!ownFieldsPresent && !amountFields.some(field => pick(source, field.keys) !== undefined) && !lines.length && <p className="muted">No {sectionTitle.toLowerCase()} details are available yet.</p>}
   </div>;
 }
-function Pagination({ page, total, pageSize, loading, onChange }: { page: number; total: number; pageSize: number; loading: boolean; onChange: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div className="pagination"><span>Showing page <b>{page}</b> of <b>{pages}</b> · {total} records</span><div><button className="secondary" disabled={loading || page <= 1} onClick={() => onChange(page - 1)}>← Previous</button><button className="secondary" disabled={loading || page >= pages} onClick={() => onChange(page + 1)}>Next →</button></div></div>; }
+
+function DocxExtractedPreview({ doc }: { doc: Doc }) {
+  const data = record(doc.extracted_json);
+  const source = {
+    ...data,
+    ...record(data.extraction),
+    ...record(data.fields),
+    ...record(data.invoice),
+    ...record(data.purchase_order),
+    ...record(data.goods_receipt),
+  };
+  const lineValue = pick(source, ["line_items", "items"]);
+  const lines = Array.isArray(lineValue) ? lineValue.map(record) : [];
+  const hiddenKeys = new Set(["raw_text", "text", "line_items", "items", "confidence", "field_confidence"]);
+  const fields = Object.entries(source).filter(([key, value]) =>
+    !hiddenKeys.has(key.toLowerCase()) &&
+    (typeof value === "string" || typeof value === "number" || typeof value === "boolean") &&
+    String(value).trim().length > 0
+  );
+  const text = stripPreviewMarkdown(doc.raw_text?.trim() || (typeof source.text === "string" ? source.text.trim() : ""));
+  if (!text && !fields.length && !lines.length) {
+    return <div className="file-preview-content"><p className="muted" role="status">No extracted content is available to preview for this document.</p></div>;
+  }
+  const lineValueText = (line: Record<string, unknown>, keys: string[]) => {
+    const value = pick(line, keys);
+    return value == null ? "" : String(value);
+  };
+  return <div className="file-preview-content docx-extracted-preview">
+    {text && <section><h3>Extracted text</h3><pre>{text}</pre></section>}
+    {fields.length > 0 && <section><h3>Extracted fields</h3><dl className="docx-preview-fields">{fields.map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{String(value)}</dd></Fragment>)}</dl></section>}
+    {lines.length > 0 && <section><h3>Extracted line items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Item code</th><th>Quantity</th><th>Unit price</th><th>Amount</th></tr></thead><tbody>{lines.map((line, index) => <tr key={index}><td>{lineValueText(line, ["description", "item_description", "name"])}</td><td>{lineValueText(line, ["item_code", "sku", "code"])}</td><td>{lineValueText(line, ["qty", "quantity"])}</td><td>{lineValueText(line, ["unit_price", "price"])}</td><td>{lineValueText(line, ["amount", "line_amount", "line_total", "total"])}</td></tr>)}</tbody></table></div></section>}
+  </div>;
+}
+
+function stripPreviewMarkdown(value: string) {
+  return value.replaceAll("**", "").replace(/^\s*#+\s?/gm, "");
+}
+
+function Pagination({ page, total, pageSize, loading, onChange }: { page: number; total: number; pageSize: number; loading: boolean; onChange: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div className="pagination"><span>Showing page <b>{page}</b> of <b>{pages}</b> Â· {total} records</span><div><button className="secondary" disabled={loading || page <= 1} onClick={() => onChange(page - 1)}><ArrowLeft {...iconProps}/> Previous</button><button className="secondary" disabled={loading || page >= pages} onClick={() => onChange(page + 1)}>Next <ArrowRight {...iconProps}/></button></div></div>; }
 
 const invoiceStatuses: InvoiceItem["status"][] = ["processing", "needs_review", "ready_to_pay", "on_hold", "rejected"];
 const invoiceStatusLabels: Record<InvoiceItem["status"], string> = { processing: "In progress", needs_review: "Needs review", ready_to_pay: "Ready to pay", on_hold: "On hold", rejected: "Rejected" };
@@ -919,11 +1175,11 @@ function InvoicesWorkspace({ invoices, counts, status, onStatus, source, onSourc
   const statusFiltered = status === "all" ? invoices : invoices.filter(invoice => invoice.status === status);
   const query = search.trim().toLowerCase();
   const visible = statusFiltered.filter(invoice => (source === "all" || invoice.source === source) && (!query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""} ${invoice.status} ${invoice.email_sender || ""} ${invoice.email_subject || ""}`.toLowerCase().includes(query)));
-  return <><header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Invoices</h1><p className="muted">Review invoice details and resolve purchase order discrepancies.</p></div><Button variant="secondary" onClick={onRefresh} disabled={loading}>↻ Refresh</Button></header>
+  return <><header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Invoices</h1><p className="muted">Review invoice details and resolve purchase order discrepancies.</p></div><Button variant="secondary" onClick={onRefresh} disabled={loading}><RefreshCw {...iconProps}/> Refresh</Button></header>
     <Card className="panel invoice-workspace"><div className="invoice-status-tabs" role="tablist" aria-label="Invoice status"><button className={status === "all" ? "active" : ""} onClick={() => onStatus("all")}>All <b>{Object.values(counts).reduce((sum, count) => sum + count, 0)}</b></button>{invoiceStatuses.map(item => <button key={item} className={status === item ? "active" : ""} onClick={() => onStatus(item)}><span className={`status-dot ${invoiceStatusClass(item)}`}/>{invoiceStatusLabels[item]} <b>{counts[item]}</b></button>)}</div>
       <div className="email-filter-row"><label className="form-label">Source<select value={source} onChange={event => onSource(event.target.value as "all" | "upload" | "email")}><option value="all">All sources</option><option value="upload">Upload</option><option value="email">Email</option></select></label></div>
       {error && <div className="notice error">{error}<button onClick={onRefresh}>Try again</button></div>}
-      {loading ? <LoadingPanel title="Loading invoices" subtitle="Retrieving invoice review status…"/> : visible.length ? <div className="table-wrap"><table className="invoice-table"><thead><tr><th>Vendor</th><th>Invoice No</th><th>Source</th><th>Sender / subject</th><th>Invoice Date</th><th>Due Date</th><th className="amount-cell">Total</th><th>Status</th><th>Source file</th></tr></thead><tbody>{visible.map(invoice => <tr key={invoice.invoice_id} onClick={() => onOpen(invoice)} tabIndex={0} onKeyDown={event => { if (event.key === "Enter") onOpen(invoice); }}><td>{invoice.vendor_name || ""}</td><td>{invoice.invoice_no || ""}</td><td><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></td><td className="invoice-source-cell">{invoice.source === "email" ? <><span>{invoice.email_sender || "Unknown sender"}</span><small>{invoice.email_subject || "No subject"}</small></> : "—"}</td><td>{invoice.invoice_date ? dateLabel(invoice.invoice_date) : ""}</td><td>{invoice.due_date ? dateLabel(invoice.due_date) : ""}</td><td className="amount-cell">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</td><td><Badge tone={invoiceStatusTone(invoice.status)} dot>{invoiceStatusLabels[invoice.status]}</Badge></td><td>{invoice.source_document_id && <button className="text-link" onClick={event => { event.stopPropagation(); onOpenDocument(invoice.source_document_id!); }}>View document</button>}</td></tr>)}</tbody></table></div> : <EmptyState title="No invoices in this status" description="Invoices received by upload or email will appear here after extraction."/>}
+      {loading ? <LoadingPanel title="Loading invoices" subtitle="Retrieving invoice review statusâ€¦"/> : visible.length ? <div className="table-wrap"><table className="invoice-table"><thead><tr><th>Vendor</th><th>Invoice No</th><th>Source</th><th>Sender / subject</th><th>Invoice Date</th><th>Due Date</th><th className="amount-cell">Total</th><th>Status</th><th>Source file</th></tr></thead><tbody>{visible.map(invoice => <tr key={invoice.invoice_id} onClick={() => onOpen(invoice)} tabIndex={0} onKeyDown={event => { if (event.key === "Enter") onOpen(invoice); }}><td>{invoice.vendor_name || ""}</td><td>{invoice.invoice_no || ""}</td><td><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></td><td className="invoice-source-cell">{invoice.source === "email" ? <><span>{invoice.email_sender || "Unknown sender"}</span><small>{invoice.email_subject || "No subject"}</small></> : "â€”"}</td><td>{invoice.invoice_date ? dateLabel(invoice.invoice_date) : ""}</td><td>{invoice.due_date ? dateLabel(invoice.due_date) : ""}</td><td className="amount-cell">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</td><td><Badge tone={invoiceStatusTone(invoice.status)} dot>{invoiceStatusLabels[invoice.status]}</Badge></td><td>{invoice.source_document_id && <button className="text-link" onClick={event => { event.stopPropagation(); onOpenDocument(invoice.source_document_id!); }}>View document</button>}</td></tr>)}</tbody></table></div> : <EmptyState title="No invoices in this status" description="Invoices received by upload or email will appear here after extraction."/>}
     </Card>
   </>;
 }
@@ -936,7 +1192,7 @@ function emailOutcome(status?: string) {
   if (status === "processing" || status === "received") return "Processing";
   return humanize(status);
 }
-function EmailInboxWorkspace({ status, messages, total, filter, onFilter, reason, onReason, page, loading, busy, error, onPoll, onRetry, onRefresh, onPage, onOpenDocument, onOpenInvoice }: {
+function EmailInboxWorkspace({ status, messages, total, filter, onFilter, reason, onReason, page, loading, busy, error, onPoll, onRetry, onRefresh, onPage, onOpenDocument, onOpenInvoice, vendorNotice, vendorVendors, canAddVendor, vendorBusy, vendorError, onAddVendor, onSelectVendor }: {
   status: EmailStatus | null;
   messages: EmailMessageItem[];
   total: number;
@@ -954,13 +1210,20 @@ function EmailInboxWorkspace({ status, messages, total, filter, onFilter, reason
   onPage: (value: number) => void;
   onOpenDocument: (id: string) => void;
   onOpenInvoice: (id: string) => void;
+  vendorNotice?: UnknownVendorInfo | null;
+  vendorVendors?: FilterVendor[];
+  canAddVendor?: boolean;
+  vendorBusy?: boolean;
+  vendorError?: string;
+  onAddVendor?: () => void;
+  onSelectVendor?: (id: string) => void;
 }) {
   const last = status?.last_result || {};
   return <div className="email-inbox-page page-enter">
-    <header className="welcome"><div><span className="eyebrow purple">MAIL INTAKE</span><h1>Email inbox</h1><p className="muted">Vendor emails and their invoice attachments.</p></div><div className="toolbar"><Button variant="secondary" onClick={onRefresh} disabled={loading}>Refresh</Button><Button variant="primary" onClick={onPoll} disabled={busy || !status?.enabled}>{busy ? "Polling…" : "Poll now"}</Button></div></header>
+    <header className="welcome"><div><span className="eyebrow purple">MAIL INTAKE</span><h1>Email inbox</h1><p className="muted">Vendor emails and their invoice attachments.</p></div><div className="toolbar"><Button variant="secondary" onClick={onRefresh} disabled={loading}>Refresh</Button><Button variant="primary" onClick={onPoll} disabled={busy || !status?.enabled}>{busy ? "Pollingâ€¦" : "Poll now"}</Button></div></header>
     <section className="email-inbox-status" aria-label="Email polling status">
       <Card><small>Last poll</small><b>{status?.last_run_at ? dateTimeLabel(status.last_run_at) : "Not polled yet"}</b><span>{status?.enabled ? "Polling enabled" : "Polling disabled"}</span></Card>
-      <Card><small>Next poll</small><b>{status?.next_poll_at ? dateTimeLabel(status.next_poll_at) : "—"}</b></Card>
+      <Card><small>Next poll</small><b>{status?.next_poll_at ? dateTimeLabel(status.next_poll_at) : "â€”"}</b></Card>
       <Card><small>Fetched</small><b>{emailPollCount(status, "mails_found", "emails")}</b></Card>
       <Card><small>Skipped</small><b>{emailPollCount(status, "skipped", "filtered")}</b></Card>
       <Card><small>Processed</small><b>{emailPollCount(status, "new_documents", "documents_created")}</b></Card>
@@ -970,7 +1233,7 @@ function EmailInboxWorkspace({ status, messages, total, filter, onFilter, reason
     {error && <div className="notice error" role="alert">{error}<button onClick={onRefresh}>Try again</button></div>}
     <Card className="panel email-message-panel">
       <div className="email-filter-row"><label className="form-label">Outcome<select value={filter} onChange={event => onFilter(event.target.value)}><option value="all">All</option><option value="processed">Processed</option><option value="skipped">Skipped</option><option value="failed">Failed</option><option value="needs_attention">Needs attention</option></select></label><label className="form-label">Reason<input value={reason} onChange={event => onReason(event.target.value)} placeholder="Filter by reason" /></label></div>
-      {loading ? <LoadingPanel title="Loading email messages" subtitle="Syncing the inbox status…"/> : messages.length ? <div className="table-wrap"><table className="email-message-table"><thead><tr><th>Sender</th><th>Subject</th><th>Received</th><th>Outcome</th><th>Reason</th><th>Invoice</th><th>Action</th></tr></thead><tbody>{messages.map(message => <tr key={message.id} className={message.status === "needs_attention" || message.status.startsWith("failed") ? "email-action-row" : ""}><td>{message.sender || "Unknown sender"}</td><td>{message.subject || "No subject"}</td><td>{dateTimeLabel(message.received_at)}</td><td><Badge tone={message.status === "processed" ? "green" : message.status.startsWith("failed") ? "red" : message.status === "needs_attention" ? "amber" : "gray"} dot>{emailOutcome(message.status)}</Badge></td><td>{message.failure_reason || message.filter_reason || "—"}</td><td>{message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenInvoice(message.linked_invoice_id!)}>{message.linked_invoice_status ? humanize(message.linked_invoice_status) : "View invoice"}</button> : message.document_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>View document</button> : "—"}</td><td>{message.retryable ? <Button variant="secondary" disabled={busy} onClick={() => onRetry(message)}>Retry</Button> : message.document_id && !message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>Open source</button> : "—"}</td></tr>)}</tbody></table></div> : <EmptyState title="No email messages found" description={filter !== "all" || reason ? "Change your filters to view more messages." : "Email messages will appear here after polling begins."} action={filter !== "all" || reason ? <Button variant="secondary" onClick={() => { onFilter("all"); onReason(""); }}>Clear filters</Button> : null}/>}
+      {loading ? <LoadingPanel title="Loading email messages" subtitle="Syncing the inbox statusâ€¦"/> : messages.length ? <div className="table-wrap"><table className="email-message-table"><thead><tr><th>Sender</th><th>Subject</th><th>Received</th><th>Outcome</th><th>Reason</th><th>Invoice</th><th>Action</th></tr></thead><tbody>{messages.map(message => <tr key={message.id} className={message.status === "needs_attention" || message.status.startsWith("failed") ? "email-action-row" : ""}><td>{message.sender || "Unknown sender"}</td><td>{message.subject || "No subject"}</td><td>{dateTimeLabel(message.received_at)}</td><td><Badge tone={message.status === "processed" ? "green" : message.status.startsWith("failed") ? "red" : message.status === "needs_attention" ? "amber" : "gray"} dot>{emailOutcome(message.status)}</Badge></td><td>{message.failure_reason || message.filter_reason || "â€”"}{vendorNotice?.recordId === (message.document_id || message.linked_invoice_id) && vendorNotice && <VendorResolutionBanner info={vendorNotice} vendors={vendorVendors || []} canAddVendor={Boolean(canAddVendor)} busy={vendorBusy} error={vendorError} onAdd={onAddVendor || (() => undefined)} onSelect={onSelectVendor || (() => undefined)}/>}</td><td>{message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenInvoice(message.linked_invoice_id!)}>{message.linked_invoice_status ? humanize(message.linked_invoice_status) : "View invoice"}</button> : message.document_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>View document</button> : "â€”"}</td><td>{message.retryable ? <Button variant="secondary" disabled={busy} onClick={() => onRetry(message)}>Retry</Button> : message.document_id && !message.linked_invoice_id ? <button className="text-link" onClick={() => onOpenDocument(message.document_id!)}>Open source</button> : "â€”"}</td></tr>)}</tbody></table></div> : <EmptyState title="No email messages found" description={filter !== "all" || reason ? "Change your filters to view more messages." : "Email messages will appear here after polling begins."} action={filter !== "all" || reason ? <Button variant="secondary" onClick={() => { onFilter("all"); onReason(""); }}>Clear filters</Button> : null}/>}
       {total > 25 && <div className="pagination"><span>{total} messages</span><div><Button variant="secondary" disabled={loading || page === 0} onClick={() => onPage(page - 1)}>Previous</Button><Button variant="secondary" disabled={loading || (page + 1) * 25 >= total} onClick={() => onPage(page + 1)}>Next</Button></div></div>}
     </Card>
     <p className="muted email-model-note">Docling OCR and layout models: {status?.docling_models_available ? "available" : "not available"}.</p>
@@ -997,20 +1260,20 @@ function DashboardWorkspace({ invoices, counts, loading, error, search, emailSta
   const attention = reviewInvoices.filter(invoice => !query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""}`.toLowerCase().includes(query)).slice(0, 5);
   const chartStatuses = invoiceStatuses;
   return <div className="dashboard-page page-enter">
-    <header className="welcome dashboard-welcome"><div><span className="eyebrow purple">ACCOUNTS PAYABLE OVERVIEW</span><h1>Dashboard</h1><p className="muted">A clear view of invoices that need attention and payment.</p></div><div className="dashboard-actions"><Button variant="secondary" onClick={onRefresh} disabled={loading}>Refresh data</Button><Button variant="primary" onClick={onDocuments}>Upload documents</Button></div></header>
+    <header className="welcome dashboard-welcome"><div><span className="eyebrow purple">ACCOUNTS PAYABLE OVERVIEW</span><h1>Dashboard</h1><p className="muted">A clear view of invoices that need attention and payment.</p></div><div className="dashboard-actions"><Button variant="secondary" onClick={onRefresh} disabled={loading}><RefreshCw {...iconProps}/> Refresh data</Button><Button variant="primary" onClick={onDocuments}><Upload {...iconProps}/> Upload documents</Button></div></header>
     {error && <div className="notice error" role="alert">{error}<button onClick={onRefresh}>Try again</button></div>}
     <section className="kpi-grid" aria-label="Invoice summary">
-      <KpiCard label="Total invoices" value={total} tone="accent" icon="▤" onClick={onInvoices}/>
+      <KpiCard label="Total invoices" value={total} tone="accent" icon={<FileText {...iconProps}/>} onClick={onInvoices}/>
       <KpiCard label="Needs review" value={counts.needs_review} tone="amber" icon="!" onClick={onInvoices}/>
-      <KpiCard label="Ready to pay" value={counts.ready_to_pay} tone="green" icon="✓" onClick={onInvoices}/>
-      <KpiCard label="On hold" value={counts.on_hold} tone="gray" icon="Ⅱ" onClick={onInvoices}/>
+      <KpiCard label="Ready to pay" value={counts.ready_to_pay} tone="green" icon={<Check {...iconProps}/>} onClick={onInvoices}/>
+      <KpiCard label="On hold" value={counts.on_hold} tone="gray" icon="â…¡" onClick={onInvoices}/>
     </section>
     <section className="dashboard-grid">
-      <Card className="dashboard-card status-distribution"><div className="section-heading"><div><span className="eyebrow purple">PORTFOLIO</span><h2>Status distribution</h2><p className="muted">Current invoice totals by workflow status.</p></div><button className="text-link" onClick={onInvoices}>View invoices <span aria-hidden="true">→</span></button></div>
+      <Card className="dashboard-card status-distribution"><div className="section-heading"><div><span className="eyebrow purple">PORTFOLIO</span><h2>Status distribution</h2><p className="muted">Current invoice totals by workflow status.</p></div><button className="text-link" onClick={onInvoices}>View invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></button></div>
         {loading ? <DashboardChartSkeleton/> : total === 0 ? <EmptyState title="No invoice data yet" description="Invoice status distribution will appear after invoices are uploaded." action={<Button onClick={onDocuments}>Go to documents</Button>}/> : <div className="distribution-list">{chartStatuses.map(status => { const count = counts[status]; const percent = total ? Math.round(count / total * 100) : 0; return <div className="distribution-row" key={status}><div className="distribution-label"><Badge tone={invoiceStatusTone(status)} dot>{invoiceStatusLabels[status]}</Badge><span>{count.toLocaleString("en-IN")}</span></div><div className="distribution-track"><span className={`distribution-fill ${invoiceStatusClass(status)}`} style={{ width: `${percent}%` }}/></div><small>{percent}%</small></div>; })}</div>}
       </Card>
       <Card className="dashboard-card attention-card"><div className="section-heading"><div><span className="eyebrow purple">ACTION REQUIRED</span><h2>Needs attention</h2><p className="muted">Recent invoices waiting for review.</p></div><Badge tone="amber" dot>{counts.needs_review} open</Badge></div>
-        {loading ? <AttentionSkeleton/> : attention.length ? <div className="attention-list">{attention.map((invoice, index) => <button className="attention-row" key={invoice.invoice_id} onClick={() => onOpen(invoice)} style={{ "--row-index": index } as React.CSSProperties}><span className="attention-vendor-icon">{(invoice.vendor_name || "V").slice(0, 1).toUpperCase()}</span><span className="attention-copy"><b>{invoice.vendor_name || "Unknown vendor"}</b><small>{invoice.invoice_no || "Invoice"}{invoice.invoice_date ? ` · ${dateLabel(invoice.invoice_date)}` : ""}</small></span><span className="attention-amount">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</span><span className="attention-arrow" aria-hidden="true">→</span></button>)}<Button variant="ghost" className="attention-more" onClick={onInvoices}>Review all invoices <span aria-hidden="true">→</span></Button></div> : <EmptyState title="You’re all caught up" description="There are no invoices waiting for review."/>}
+        {loading ? <AttentionSkeleton/> : attention.length ? <div className="attention-list">{attention.map((invoice, index) => <button className="attention-row" key={invoice.invoice_id} onClick={() => onOpen(invoice)} style={{ "--row-index": index } as React.CSSProperties}><span className="attention-vendor-icon">{(invoice.vendor_name || "V").slice(0, 1).toUpperCase()}</span><span className="attention-copy"><b>{invoice.vendor_name || "Unknown vendor"}</b><small>{invoice.invoice_no || "Invoice"}{invoice.invoice_date ? ` Â· ${dateLabel(invoice.invoice_date)}` : ""}</small></span><span className="attention-amount">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</span><span className="attention-arrow" aria-hidden="true"><ArrowRight {...iconProps}/></span></button>)}<Button variant="ghost" className="attention-more" onClick={onInvoices}>Review all invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></Button></div> : <EmptyState title="Youâ€™re all caught up" description="There are no invoices waiting for review."/>}
       </Card>
     </section>
     <Card className="panel email-dashboard-card"><div className="panel-head"><div><span className="eyebrow purple">INBOUND DOCUMENTS</span><h2>Email inbox</h2><p className="muted">Review vendor emails and document intake.</p></div><div className="toolbar"><Button variant="secondary" onClick={onEmail}>Open inbox</Button><Button variant="primary" onClick={onPollEmail}>Poll now</Button></div></div><div className="email-inbox-status"><span><small>Last poll</small><b>{emailStatus?.last_run_at ? dateTimeLabel(emailStatus.last_run_at) : "Not polled yet"}</b></span><span><small>Fetched</small><b>{emailPollCount(emailStatus, "mails_found", "emails")}</b></span><span><small>Skipped</small><b>{emailPollCount(emailStatus, "skipped", "filtered")}</b></span><span><small>Processed</small><b>{emailPollCount(emailStatus, "new_documents", "documents_created")}</b></span><span><small>Failed</small><b>{emailStatus?.counts?.failed || 0}</b></span></div>{emailStatus && !emailStatus.docling_models_available && <div className="notice error">OCR models are not installed. Ask an admin to run the model download.</div>}</Card>
@@ -1018,8 +1281,8 @@ function DashboardWorkspace({ invoices, counts, loading, error, search, emailSta
   </div>;
 }
 
-function KpiCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "amber" | "green" | "gray"; icon: string; onClick: () => void }) {
-  return <Card className={`kpi-card kpi-${tone}`}><button className="kpi-card-button" onClick={onClick}><span className="kpi-icon">{icon}</span><span className="kpi-label">{label}</span><CountUp value={value}/><span className="kpi-link">View details <span aria-hidden="true">→</span></span></button></Card>;
+function KpiCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "amber" | "green" | "gray"; icon: React.ReactNode; onClick: () => void }) {
+  return <Card className={`kpi-card kpi-${tone}`}><button className="kpi-card-button" onClick={onClick}><span className="kpi-icon">{icon}</span><span className="kpi-label">{label}</span><CountUp value={value}/><span className="kpi-link">View details <span aria-hidden="true"><ArrowRight {...iconProps}/></span></span></button></Card>;
 }
 
 function CountUp({ value }: { value: number }) {
@@ -1065,12 +1328,14 @@ function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatc
     {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}
     <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{labels.map(([label, keys]) => { const value = keys.map(key => invoice[key]).find(item => item != null && item !== ""); if (value == null || (typeof value !== "string" && typeof value !== "number")) return null; const shown = ["invoice_date", "due_date"].includes(String(keys[0])) ? dateLabel(String(value)) : String(value); return <DetailField key={label} label={label} value={shown}/>; })}</div></section>
     <section className="extracted-section"><h3 className="section-title">Amounts</h3><div className="field-grid"><DetailField label="Subtotal" value={invoice.subtotal == null ? undefined : formatInvoiceMoney(invoice.subtotal, invoice.currency)}/><DetailField label="Tax" value={invoice.tax_amount == null ? undefined : formatInvoiceMoney(invoice.tax_amount, invoice.currency)}/><DetailField label="Total" value={invoice.total_amount == null ? undefined : formatInvoiceMoney(invoice.total_amount, invoice.currency)}/></div></section>
-    {(invoice.line_items || []).length > 0 && <section className="extracted-section"><h3 className="section-title">Line Items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.line_items!.map((line, index) => { const qty = Number(line.qty); return <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty == null || !Number.isFinite(qty) ? "" : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(qty)}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.currency)}</td><td>{line.amount == null ? "" : formatInvoiceMoney(line.amount, invoice.currency)}</td></tr>; })}</tbody></table></div></section>}
+    {(invoice.line_items || []).length > 0 && <section className="extracted-section"><h3 className="section-title">Line Items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.line_items!.map((line, index) => { const qty = Number(line.qty); return <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty == null || !Number.isFinite(qty) ? "" : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(qty)}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.currency)}</td><td>{line.line_amount == null ? "" : formatInvoiceMoney(line.line_amount, invoice.currency)}</td></tr>; })}</tbody></table></div></section>}
+    {invoice.match_outcome?.discrepancies && <section className="extracted-section"><h3 className="section-title">Discrepancies</h3>{invoice.match_outcome.discrepancies.length ? <div className="table-wrap"><table className="comparison-table"><thead><tr><th>Issue</th><th>Invoice value</th><th>PO/GR value</th><th>Difference</th><th>Next action</th></tr></thead><tbody>{invoice.match_outcome.discrepancies.map((item, index) => <tr key={`${item.code}-${item.line_reference || index}`}><td>{item.message}{item.line_reference ? ` (${item.line_reference})` : ""}</td><td>{safeCompareValue(item.invoice_value)}</td><td>{safeCompareValue(item.expected_value)}</td><td>{safeCompareValue(item.difference)}</td><td>{item.next_action || "Review the invoice."}</td></tr>)}</tbody></table></div> : <p>No matching discrepancies.</p>}</section>}
     {rows.length > 0 && <section className="extracted-section"><h3 className="section-title">Match review</h3><div className="discrepancy-badges">{issues.map(item => <span key={`${item.field}-${item.reason}`} className={`discrepancy-badge ${item.severity === "error" ? "mismatch" : "within-tolerance"}`}>{item.field.includes("po_found") ? "No PO" : item.field.includes("unit_price") || item.field.includes("line_price") ? "Price mismatch" : item.field.includes("goods_receipt") || item.field.includes("accepted_quantity") ? "No goods receipt" : item.field.includes("quantity") ? "Qty exceeds PO" : humanize(item.field)}</span>)}</div><div className="table-wrap"><table className="comparison-table"><thead><tr><th>Field</th><th>Invoice</th><th>PO</th><th>Goods Receipt</th><th>Status</th></tr></thead><tbody>{issues.map(item => <InvoiceComparisonRow key={`${item.field}-${item.reason}`} item={item} currency={invoice.currency}/> )}</tbody></table></div>{rows.some(item => item.resolved) && <details className="matched-fields"><summary>Show matched fields ({rows.filter(item => item.resolved).length})</summary><div className="table-wrap"><table className="comparison-table"><thead><tr><th>Field</th><th>Invoice</th><th>PO</th><th>Goods Receipt</th><th>Status</th></tr></thead><tbody>{rows.filter(item => item.resolved).map(item => <InvoiceComparisonRow key={`${item.field}-${item.reason}`} item={item} currency={invoice.currency}/>)}</tbody></table></div></details>}</section>}
-    {invoice.status === "needs_review" && !invoice.po_number_raw && candidates.length > 0 && <div className="suggestion-card"><small>SUGGESTED PURCHASE ORDER</small><h3>This invoice matches {candidates[0].po_number} ({candidates[0].vendor_name || "vendor"}, amount, items — {Math.round(candidates[0].score)}% match). Match this PO?</h3><p>Matched signals: vendor, total amount, and item descriptions.</p><div><button className="primary" onClick={() => onMatch(candidates[0], true)}>Yes, match this PO</button><button className="secondary" onClick={() => onMatch(candidates[0], false)}>No</button></div></div>}
+    {invoice.status === "needs_review" && !invoice.po_number_raw && candidates.length > 0 && <div className="suggestion-card"><small>SUGGESTED PURCHASE ORDER</small><h3>This invoice matches {candidates[0].po_number} ({candidates[0].vendor_name || "vendor"}, amount, items â€” {Math.round(candidates[0].score)}% match). Match this PO?</h3><p>Matched signals: vendor, total amount, and item descriptions.</p><div><button className="primary" onClick={() => onMatch(candidates[0], true)}>Yes, match this PO</button><button className="secondary" onClick={() => onMatch(candidates[0], false)}>No</button></div></div>}
     {invoice.status === "needs_review" && !invoice.po_number_raw && !candidates.length && <p className="muted">No match found for this invoice.</p>}
     {hasNoReceipt && invoice.status === "needs_review" && <div className="notice info">No goods receipt was found. You can hold this invoice while waiting for the receipt, approve with an exception, or reject it.</div>}
     <div className="modal-actions"><button className="secondary" onClick={() => onDecision("hold")} disabled={invoice.status === "rejected"}>Hold</button><button className="danger-button" onClick={() => onDecision("reject")} disabled={invoice.status === "rejected"}>Reject</button>{invoice.status === "needs_review" && <button className="primary" onClick={() => onDecision("approve-exception")}>Approve with exception</button>}</div>
+    </>}
   </div></section>;
 }
 

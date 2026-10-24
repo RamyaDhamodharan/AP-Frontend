@@ -1,3 +1,4 @@
+import { FileText } from "lucide-react";
 import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -56,5 +57,5 @@ export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivEle
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="empty"><div className="empty-icon" aria-hidden="true">▤</div><h3>{title}</h3><p>{description}</p>{action}</div>;
+  return <div className="empty"><div className="empty-icon" aria-hidden="true"><FileText size={18} strokeWidth={1.75}/></div><h3>{title}</h3><p>{description}</p>{action}</div>;
 }

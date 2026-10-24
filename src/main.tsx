@@ -57,6 +57,8 @@ axios.interceptors.response.use(undefined, async (error: AxiosError) => {
 type Doc = {
   id?: string | null; local_key?: string; original_filename: string; status: string; doc_type?: string | null;
   created_at?: string | null; updated_at?: string | null; failure_message?: string | null;
+  failure_class?: string | null; retry_count?: number; next_retry_at?: string | null;
+  audit_history?: { action: string; result: string; message?: string | null; reason?: string | null; new_value?: Record<string, unknown> | null; created_at?: string | null }[];
   extracted_json?: Record<string, unknown> | null; raw_text?: string | null;
   source?: string | null; email_sender?: string | null; email_subject?: string | null;
   email_received_at?: string | null; linked_invoice_id?: string | null;
@@ -155,6 +157,8 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; kind: "success" | "error" | "info" } | null>(null);
   const [documents, setDocuments] = useState<Doc[]>([]);
+  const [bulkReprocessBusy, setBulkReprocessBusy] = useState(false);
+  const [bulkReprocessProgress, setBulkReprocessProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [localFailedDocuments, setLocalFailedDocuments] = useState<Doc[]>([]);
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
   const [invoiceCounts, setInvoiceCounts] = useState<Record<InvoiceItem["status"], number>>({ processing: 0, needs_review: 0, ready_to_pay: 0, on_hold: 0, rejected: 0 });
@@ -804,6 +808,32 @@ function App() {
     } catch (error) { notify(getError(error, "Could not retry document processing."), "error"); }
     finally { setDetailLoading(false); }
   }
+  async function reprocessAllDocuments() {
+    if (profile?.role !== "admin" || bulkReprocessBusy) return;
+    if (!window.confirm("Reprocess up to five eligible documents at a time? This will run the current processing code on documents marked for review or retry.")) return;
+    setBulkReprocessBusy(true);
+    setBulkReprocessProgress({ done: 0, total: 0, failed: 0 });
+    let done = 0;
+    let total = 0;
+    let failed = 0;
+    try {
+      while (true) {
+        const response = await axios.post<{ scanned: number; completed: number; failed: number; remaining: number }>(`${CORE_URL}/api/documents/admin/reprocess-all`, {}, { headers: authHeaders() });
+        const batch = response.data;
+        done += batch.completed;
+        failed += batch.failed;
+        total = Math.max(total, done + batch.remaining);
+        setBulkReprocessProgress({ done, total, failed });
+        await loadDocuments(1);
+        if (batch.remaining <= 0 || batch.scanned === 0) break;
+      }
+      notify(`Reprocessing finished: ${done} documents handled, ${failed} failed.`, failed ? "error" : "success");
+    } catch (error) {
+      notify(getError(error, "Could not reprocess the documents."), "error");
+    } finally {
+      setBulkReprocessBusy(false);
+    }
+  }
   async function pollEmailNow() {
     setEmailBusy(true);
     try {
@@ -925,7 +955,8 @@ function App() {
         </div>}
         <section className={`panel simple-documents ${isDraggingDocuments ? "is-dragging" : ""}`} onDragOver={event => { event.preventDefault(); setIsDraggingDocuments(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingDocuments(false); }} onDrop={event => { event.preventDefault(); setIsDraggingDocuments(false); void uploadFiles(Array.from(event.dataTransfer.files)); }}>
           <div className="document-drop-hint" aria-live="polite">Drop up to 5 files here, or use Upload documents.</div>
-          <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><span className="count">{docTotal} files</span></div>
+          <div className="panel-head"><div><h2>Your documents</h2><p className="muted">Select any card to preview the document details.</p></div><div className="panel-head-actions">{profile?.role === "admin" && <button className="secondary" onClick={() => void reprocessAllDocuments()} disabled={bulkReprocessBusy}>{bulkReprocessBusy ? "Reprocessing…" : "Reprocess all"}</button>}<span className="count">{docTotal} files</span></div></div>
+          {bulkReprocessProgress && <div className="notice info" role="status">{bulkReprocessBusy ? "Reprocessing" : "Reprocessed"} {bulkReprocessProgress.done} of {bulkReprocessProgress.total} documents{bulkReprocessProgress.failed ? ` · ${bulkReprocessProgress.failed} failed` : ""}</div>}
           <div className="toolbar simple-toolbar">
             <label className="search"><Search {...iconProps}/><input value={docSearch} onChange={e => setDocSearch(e.target.value)} placeholder="Search documents…" /></label>
             <select value={docSource} onChange={e => { setDocPage(1); setDocSource(e.target.value as "latest" | "all" | "email"); }} aria-label="Filter documents by source"><option value="latest">Latest upload</option><option value="email">Email</option><option value="all">All</option></select>
@@ -938,7 +969,7 @@ function App() {
             <div className="document-card-grid">{filteredDocs.map((doc, index) => { const actionState = documentActionAvailability(doc.id); return <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id || doc.local_key || `${doc.original_filename}-${index}`} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
               <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
               <div className="document-card-status"><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span>
-                {doc.status === "failed" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
+                {doc.status === "failed" && doc.failure_class !== "permanent" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
               </div>
               <span className="document-card-reason" title={doc.failure_message || undefined}>{doc.failure_message || (isProcessing(doc.status) ? "Processing. Status refreshes automatically." : doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>
             </article>; })}</div>
@@ -954,7 +985,7 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); const docx = isDocxFilename(selectedDoc.original_filename); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}>{docx ? <Download {...iconProps}/> : <ExternalLink {...iconProps}/>} {docx ? "Download to view" : "View original"}</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentRetryTimeline doc={selectedDoc}/><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); const docx = isDocxFilename(selectedDoc.original_filename); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}>{docx ? <Download {...iconProps}/> : <ExternalLink {...iconProps}/>} {docx ? "Download to view" : "View original"}</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && (selectedDoc.status.toLowerCase() !== "failed" || selectedDoc.failure_class !== "permanent") && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
     {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) { URL.revokeObjectURL(filePreview.url); setFilePreview(null); } }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><h2 id="file-preview-title">{filePreview.filename}</h2><button className="modal-close" aria-label="Close file preview" onClick={() => { URL.revokeObjectURL(filePreview.url); setFilePreview(null); }}><X {...iconProps}/></button></header><iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/></section></div>}
     {selectedInvoice && (
@@ -1024,6 +1055,12 @@ const invoiceFields: { label: string; keys: string[]; date?: boolean }[] = [
   { label: "Payment Terms", keys: ["payment_terms", "terms"] },
   { label: "Currency", keys: ["currency", "currency_code"] },
 ];
+function DocumentRetryTimeline({ doc }: { doc: Doc }) {
+  const events = (doc.audit_history || []).filter(event => ["document_processing_attempt", "document_stuck_requeued", "document_stuck_failed"].includes(event.action)).slice().reverse();
+  if (!events.length && !doc.retry_count && !doc.next_retry_at) return null;
+  return <section className="extracted-section"><h3 className="section-title">Processing attempts</h3>{events.length ? <ol className="processing-attempts">{events.map((event, index) => { const value = event.new_value || {}; const retry = event.result === "retry_scheduled" || event.action === "document_stuck_requeued"; const attempt = Number(value.attempt || index + 1); const next = value.next_retry_at || doc.next_retry_at; return <li key={`${event.action}-${event.created_at || index}`}><strong>{retry ? `Retry ${attempt} of 3 scheduled` : `Attempt ${attempt}`}</strong><span>{event.reason || event.message || (event.result === "started" ? "Processing started." : humanize(event.result))}</span>{next && <small>Next retry: {dateTimeLabel(String(next))}</small>}</li>; })}</ol> : <p>Retry {doc.retry_count || 0} of 3{doc.next_retry_at ? ` · Next retry: ${dateTimeLabel(doc.next_retry_at)}` : ""}</p>}</section>;
+}
+
 function DocumentExtractedDetails({ doc }: { doc: Doc }) {
   const data = record(doc.extracted_json);
   const nested = doc.doc_type === "invoice" ? record(data.invoice) : {};

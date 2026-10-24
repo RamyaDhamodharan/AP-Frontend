@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { canAccessLogs, canSeeAdminNavigation } from "../src/accessControls.ts";
 import { defaultSortLabel, toggleSortDirection } from "../src/sortControls.ts";
-import { MAX_FILES_PER_UPLOAD, UPLOAD_LIMIT_MESSAGE, uploadLimitMessage } from "../src/uploadLimits.ts";
+import { isDocxFilename, isSupportedUploadFilename, MAX_FILES_PER_UPLOAD, UPLOAD_LIMIT_MESSAGE, uploadLimitMessage } from "../src/uploadLimits.ts";
 import { userFacingErrorMessage } from "../src/errorMessages.ts";
 import { documentActionAvailability, isValidDocumentId } from "../src/documentIds.ts";
 import axios from "axios";
@@ -26,6 +26,15 @@ test("upload selection allows five files and rejects larger batches clearly", ()
   assert.equal(MAX_FILES_PER_UPLOAD, 5);
   assert.equal(uploadLimitMessage(5), null);
   assert.equal(uploadLimitMessage(6), UPLOAD_LIMIT_MESSAGE);
+});
+
+test("DOCX is a supported upload and is identified for download-only viewing", () => {
+  assert.equal(isSupportedUploadFilename("invoice.docx"), true);
+  assert.equal(isSupportedUploadFilename("invoice.DOCX"), true);
+  assert.equal(isSupportedUploadFilename("invoice.docm"), false);
+  assert.equal(isSupportedUploadFilename("invoice.doc"), false);
+  assert.equal(isDocxFilename("invoice.DOCX"), true);
+  assert.equal(isDocxFilename("invoice.docm"), false);
 });
 
 test("file API errors are mapped to plain user messages", () => {

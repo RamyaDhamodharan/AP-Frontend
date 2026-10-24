@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canAccessLogs, canSeeAdminNavigation } from "../src/accessControls.ts";
+import { canAccessLogs, canCreateVendor, canSeeAdminNavigation } from "../src/accessControls.ts";
 import { defaultSortLabel, toggleSortDirection } from "../src/sortControls.ts";
 import { isDocxFilename, isSupportedUploadFilename, MAX_FILES_PER_UPLOAD, UPLOAD_LIMIT_MESSAGE, uploadLimitMessage } from "../src/uploadLimits.ts";
 import { userFacingErrorMessage } from "../src/errorMessages.ts";
@@ -9,6 +9,7 @@ import { documentDetailSectionTitle, linkedRecordDestination } from "../src/docu
 import { vendorMatches } from "../src/vendorMatching.ts";
 import { sourceFileActionAvailability, sourceFilePreviewMime, sourceFileViewerMode } from "../src/sourceFileActions.ts";
 import { confidenceLabel } from "../src/procurementControls.ts";
+import { documentStatusLabel, isDocumentProcessing, isRetryScheduled } from "../src/documentStatus.ts";
 import axios from "axios";
 
 test("Logs navigation and access are admin-only", () => {
@@ -17,6 +18,21 @@ test("Logs navigation and access are admin-only", () => {
   assert.equal(canSeeAdminNavigation("associate"), false);
   assert.equal(canAccessLogs("associate"), false);
   assert.equal(canAccessLogs(null), false);
+});
+
+test("vendor creation is available to authenticated admins and associates", () => {
+  assert.equal(canCreateVendor("admin"), true);
+  assert.equal(canCreateVendor("associate"), true);
+  assert.equal(canCreateVendor(null), false);
+  assert.equal(canCreateVendor("viewer"), false);
+});
+
+test("scheduled retries remain Processing without exposing attempt details", () => {
+  const scheduled = { status: "failed", failure_class: "retryable", next_retry_at: "2030-01-01T00:00:00Z" };
+  assert.equal(isRetryScheduled(scheduled), true);
+  assert.equal(isDocumentProcessing(scheduled), true);
+  assert.equal(documentStatusLabel(scheduled, status => status || "Unknown"), "Processing");
+  assert.equal(isDocumentProcessing({ status: "failed", failure_class: "retry_exhausted", next_retry_at: null }), false);
 });
 
 test("sort direction toggles and labels the current server order", () => {

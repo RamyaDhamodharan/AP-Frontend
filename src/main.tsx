@@ -6,12 +6,14 @@ import { Badge, Button, Card, Skeleton, Tabs } from "./components/ui";
 import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceLevel, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
+import { ProcurementWorkspacePage } from "./components/ProcurementWorkspacePage";
 import { LogsPage } from "./components/LogsPage";
 import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
 import { isDocxFilename, isSupportedUploadFilename, uploadLimitMessage } from "./uploadLimits";
 import { userFacingErrorMessage } from "./errorMessages";
 import { documentActionAvailability, isValidDocumentId } from "./documentIds";
+import { documentDetailSectionTitle, linkedRecordDestination } from "./documentNavigation";
 import { Sidebar, type WorkspacePage } from "./components/Sidebar";
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CircleAlert, CircleCheck,
@@ -54,7 +56,7 @@ type Doc = {
   extracted_json?: Record<string, unknown> | null; raw_text?: string | null;
   source?: string | null; email_sender?: string | null; email_subject?: string | null;
   email_received_at?: string | null; linked_invoice_id?: string | null;
-  linked_invoice_status?: string | null;
+  linked_invoice_status?: string | null; linked_po_id?: string | null; linked_gr_id?: string | null;
 };
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
@@ -117,7 +119,7 @@ function emailPollCount(status: EmailStatus | null, key: string, fallback: strin
   return typeof value === "number" ? value : 0;
 }
 function App() {
-  const [activePage, setActivePage] = useState<"dashboard" | "command-center" | "documents" | "invoices" | "email" | "associates" | "logs">(() => new URLSearchParams(window.location.search).get("page") === "logs" ? "logs" : "dashboard");
+  const [activePage, setActivePage] = useState<WorkspacePage>(() => { const page = new URLSearchParams(window.location.search).get("page"); return ["logs", "purchase-orders", "goods-receipts"].includes(page || "") ? page as WorkspacePage : "dashboard"; });
   const { filters: invoiceQuery, update: updateInvoiceQuery } = useInvoiceQueryState();
   const invoiceSource = (invoiceQuery.source || "all") as "all" | "upload" | "email";
   const [globalSearch, setGlobalSearch] = useState(invoiceQuery.search || "");
@@ -157,11 +159,12 @@ function App() {
   const setInvoiceSource = (source: "all" | "upload" | "email") => updateInvoiceQuery({ source });
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (activePage === "logs") params.set("page", "logs"); else params.delete("page");
+    if (["logs", "purchase-orders", "goods-receipts"].includes(activePage)) params.set("page", activePage); else params.delete("page");
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
   }, [activePage]);
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
+  const [procurementRecordId, setProcurementRecordId] = useState<string | null>(null);
   const [invoiceDrawerTab, setInvoiceDrawerTab] = useState<"details" | "timeline">("details");
   const [noMatchDraft, setNoMatchDraft] = useState<NoMatchDraft | null>(null);
   const [emailDraftEditor, setEmailDraftEditor] = useState<EmailDraftDetail | null>(null);
@@ -625,21 +628,20 @@ function App() {
   async function openDocument(doc: Doc) {
     setSelectedDoc(doc); setModalError(""); setDetailLoading(true);
     try {
-      if (doc.linked_invoice_id) {
-        setSelectedDoc(null);
-        setActivePage("invoices");
-        await openInvoice(doc.linked_invoice_id, "details");
-        return;
-      }
       if (!isValidDocumentId(doc.id)) return;
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
-      if (response.data.linked_invoice_id) {
+      const detail = response.data;
+      const destination = linkedRecordDestination(detail);
+      if (destination?.page === "invoices") {
         setSelectedDoc(null);
         setActivePage("invoices");
-        await openInvoice(response.data.linked_invoice_id, "details");
+        await openInvoice(destination.recordId, "details");
         return;
       }
-      setSelectedDoc(response.data);
+      if (destination?.page === "purchase-orders" || destination?.page === "goods-receipts") {
+        setSelectedDoc(null); setProcurementRecordId(destination.recordId); setActivePage(destination.page); return;
+      }
+      setSelectedDoc(detail);
     } catch (error) { setModalError(getError(error, "Could not load document details.")); }
     finally { setDetailLoading(false); }
   }
@@ -838,9 +840,9 @@ function App() {
 
   return <div className="app-shell">
     <Sidebar activePage={activePage} isAdmin={canSeeAdminNavigation(profile?.role)} documentCount={docTotal} invoiceCount={Object.values(invoiceCounts).reduce((sum, count) => sum + count, 0)} emailAttentionCount={emailStatus?.counts?.needs_attention || 0} name={profile?.name || ""} email={email} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} onNavigate={navigateTo} onSignOut={() => void logout()} signOutDisabled={authBusy}/>
-    <main className="main-area"><header className="topbar"><button type="button" className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
+    <main className="main-area"><header className="topbar"><button type="button" className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "purchase-orders" ? "Purchase Orders" : activePage === "goods-receipts" ? "Goods Receipts" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
       <div className="content">
-      {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={{ ...Object.fromEntries(associates.map(user => [user.id, user.name])), ...(readAccessClaims(token)?.sub ? { [readAccessClaims(token)!.sub]: profile?.name || profile?.email || "Admin" } : {}) }} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
+      {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={{ ...Object.fromEntries(associates.map(user => [user.id, user.name])), ...(readAccessClaims(token)?.sub ? { [readAccessClaims(token)!.sub]: profile?.name || profile?.email || "Admin" } : {}) }} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "purchase-orders" ? <ProcurementWorkspacePage kind="purchase_order" coreUrl={CORE_URL} authHeaders={authHeaders} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "goods-receipts" ? <ProcurementWorkspacePage kind="goods_receipt" coreUrl={CORE_URL} authHeaders={authHeaders} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
         <section className="panel admin-associate-panel">
           <div className="panel-head"><div><span className="eyebrow purple">ADMINISTRATION</span><h2>Add an associate</h2><p className="muted">Temporary password is valid for 24 hours. The associate must change it at first sign in.</p></div></div>
           <form className="toolbar" onSubmit={createAssociate}>
@@ -892,7 +894,7 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); const docx = isDocxFilename(selectedDoc.original_filename); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}>{docx ? <Download {...iconProps}/> : <ExternalLink {...iconProps}/>} {docx ? "Download to view" : "View original"}</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : <div className="notice error">{selectedDoc.failure_message || "No linked record is available for this document."}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); const docx = isDocxFilename(selectedDoc.original_filename); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}>{docx ? <Download {...iconProps}/> : <ExternalLink {...iconProps}/>} {docx ? "Download to view" : "View original"}</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes(selectedDoc.status.toLowerCase()) && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
     {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) { URL.revokeObjectURL(filePreview.url); setFilePreview(null); } }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><h2 id="file-preview-title">{filePreview.filename}</h2><button className="modal-close" aria-label="Close file preview" onClick={() => { URL.revokeObjectURL(filePreview.url); setFilePreview(null); }}><X {...iconProps}/></button></header><iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/></section></div>}
     {selectedInvoice && (
@@ -961,7 +963,7 @@ const invoiceFields: { label: string; keys: string[]; date?: boolean }[] = [
 ];
 function DocumentExtractedDetails({ doc }: { doc: Doc }) {
   const data = record(doc.extracted_json);
-  const nested = record(data.invoice);
+  const nested = doc.doc_type === "invoice" ? record(data.invoice) : {};
   const source = { ...data, ...nested };
   const currencyValue = pick(source, ["currency", "currency_code"]);
   const currency = typeof currencyValue === "string" && /^[A-Za-z]{3}$/.test(currencyValue) ? currencyValue.toUpperCase() : "";
@@ -985,9 +987,15 @@ function DocumentExtractedDetails({ doc }: { doc: Doc }) {
     { label: "Tax", keys: ["tax", "tax_amount", "total_tax"] },
     { label: "Total", keys: ["total", "total_amount", "invoice_total", "grand_total"] },
   ];
-  const invoicePresent = invoiceFields.some(field => pick(source, field.keys) !== undefined);
+  const documentFields = doc.doc_type === "po" || doc.doc_type === "purchase_order"
+    ? [{ label: "PO Number", keys: ["po_number", "order_number"] }, { label: "PO Date", keys: ["po_date"], date: true }, { label: "Vendor", keys: ["vendor", "vendor_name"] }, { label: "Payment Terms", keys: ["payment_terms", "terms"] }]
+    : doc.doc_type === "goods_receipt"
+      ? [{ label: "Receipt Number", keys: ["gr_number", "receipt_number", "goods_receipt_number"] }, { label: "Receipt Date", keys: ["receipt_date"], date: true }, { label: "PO Number", keys: ["po_number", "order_number"] }, { label: "Vendor", keys: ["vendor", "vendor_name"] }]
+      : doc.doc_type === "invoice" ? invoiceFields : [];
+  const sectionTitle = documentDetailSectionTitle(doc.doc_type);
+  const ownFieldsPresent = documentFields.some(field => pick(source, field.keys) !== undefined);
   return <div className="extracted-details">
-    {invoicePresent && <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{invoiceFields.map(field => {
+    {ownFieldsPresent && <section className="extracted-section"><h3 className="section-title">{sectionTitle}</h3><div className="field-grid">{documentFields.map(field => {
       const value = pick(source, field.keys);
       return <DetailField key={field.label} label={field.label} value={field.date ? displayDate(value) : value} verify={value !== undefined && confidenceFor(source, confidenceKeys(field.keys))}/>;
     })}</div></section>}
@@ -1002,7 +1010,7 @@ function DocumentExtractedDetails({ doc }: { doc: Doc }) {
       const amount = pick(line, ["amount", "line_amount", "line_total", "total"]);
       return <tr key={index}><td>{description == null ? "" : String(description)}{description != null && confidenceFor(line, ["description", "item_description"]) && <small className="verify-warning"><CircleAlert {...iconProps}/> Please verify</small>}</td><td>{formatQuantity(quantity) || ""}{quantity != null && confidenceFor(line, ["qty", "quantity"]) && <small className="verify-warning"><CircleAlert {...iconProps}/> Please verify</small>}</td><td>{formatAmount(price) || ""}{price != null && confidenceFor(line, ["unit_price"]) && <small className="verify-warning"><CircleAlert {...iconProps}/> Please verify</small>}</td><td>{formatAmount(amount) || ""}{amount != null && confidenceFor(line, ["amount", "line_amount", "line_total"]) && <small className="verify-warning"><CircleAlert {...iconProps}/> Please verify</small>}</td></tr>;
     })}</tbody></table></div></section>}
-    {!invoicePresent && !amountFields.some(field => pick(source, field.keys) !== undefined) && !lines.length && <p className="muted">No invoice details are available yet.</p>}
+    {!ownFieldsPresent && !amountFields.some(field => pick(source, field.keys) !== undefined) && !lines.length && <p className="muted">No {sectionTitle.toLowerCase()} details are available yet.</p>}
   </div>;
 }
 function Pagination({ page, total, pageSize, loading, onChange }: { page: number; total: number; pageSize: number; loading: boolean; onChange: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div className="pagination"><span>Showing page <b>{page}</b> of <b>{pages}</b> · {total} records</span><div><button className="secondary" disabled={loading || page <= 1} onClick={() => onChange(page - 1)}><ArrowLeft {...iconProps}/> Previous</button><button className="secondary" disabled={loading || page >= pages} onClick={() => onChange(page + 1)}>Next <ArrowRight {...iconProps}/></button></div></div>; }

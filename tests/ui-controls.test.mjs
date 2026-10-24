@@ -5,6 +5,7 @@ import { defaultSortLabel, toggleSortDirection } from "../src/sortControls.ts";
 import { isDocxFilename, isSupportedUploadFilename, MAX_FILES_PER_UPLOAD, UPLOAD_LIMIT_MESSAGE, uploadLimitMessage } from "../src/uploadLimits.ts";
 import { userFacingErrorMessage } from "../src/errorMessages.ts";
 import { documentActionAvailability, isValidDocumentId } from "../src/documentIds.ts";
+import { documentDetailSectionTitle, linkedRecordDestination } from "../src/documentNavigation.ts";
 import axios from "axios";
 
 test("Logs navigation and access are admin-only", () => {
@@ -66,4 +67,19 @@ test("document actions are disabled when the id is missing or not a UUID", () =>
   const id = "e6ab4db7-39ab-4a67-a533-231bf915c933";
   assert.equal(isValidDocumentId(id), true);
   assert.deepEqual(documentActionAvailability(id), { disabled: false, title: undefined });
+});
+
+test("document cards route to linked records and keep failed or unlinked documents in the modal", () => {
+  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "invoice", linked_invoice_id: "i-1" }), { page: "invoices", recordId: "i-1" });
+  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "po", linked_po_id: "p-1" }), { page: "purchase-orders", recordId: "p-1" });
+  assert.deepEqual(linkedRecordDestination({ status: "extracted", doc_type: "goods_receipt", linked_gr_id: "g-1" }), { page: "goods-receipts", recordId: "g-1" });
+  assert.equal(linkedRecordDestination({ status: "failed", doc_type: "goods_receipt", linked_gr_id: "g-1" }), null);
+  assert.equal(linkedRecordDestination({ status: "extracted", doc_type: "goods_receipt" }), null);
+});
+
+test("document detail section headings follow document type", () => {
+  assert.equal(documentDetailSectionTitle("goods_receipt"), "Goods Receipt");
+  assert.equal(documentDetailSectionTitle("po"), "Purchase Order");
+  assert.equal(documentDetailSectionTitle("invoice"), "Invoice");
+  assert.equal(documentDetailSectionTitle(null), "Document");
 });

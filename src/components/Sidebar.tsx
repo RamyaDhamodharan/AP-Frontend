@@ -9,10 +9,12 @@ import {
   Receipt,
   ScrollText,
   FileText,
+  ClipboardList,
+  PackageCheck,
   Users,
 } from "lucide-react";
 
-export type WorkspacePage = "dashboard" | "command-center" | "documents" | "invoices" | "email" | "associates" | "logs";
+export type WorkspacePage = "dashboard" | "command-center" | "documents" | "invoices" | "purchase-orders" | "goods-receipts" | "email" | "associates" | "logs";
 
 type Props = {
   activePage: WorkspacePage;
@@ -62,6 +64,8 @@ export function Sidebar({
     { id: "command-center", label: "Command Center", icon: <Gauge {...iconProps}/> },
     { id: "documents", label: "Documents", icon: <FileText {...iconProps}/>, count: documentCount },
     { id: "invoices", label: "Invoices", icon: <Receipt {...iconProps}/>, count: invoiceCount },
+    { id: "purchase-orders", label: "Purchase Orders", icon: <ClipboardList {...iconProps}/> },
+    { id: "goods-receipts", label: "Goods Receipts", icon: <PackageCheck {...iconProps}/> },
     { id: "email", label: "Email inbox", icon: <Mail {...iconProps}/>, count: emailAttentionCount },
     ...(isAdmin ? [{ id: "associates", label: "Associates", icon: <Users {...iconProps}/> }] : []),
   ] as const;

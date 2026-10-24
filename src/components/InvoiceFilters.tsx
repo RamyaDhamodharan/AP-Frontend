@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "./ui";
+import { defaultSortLabel, toggleSortDirection, type SortDirection } from "../sortControls";
 
 export type InvoiceQueryState = {
   status: string;
@@ -11,6 +12,7 @@ export type InvoiceQueryState = {
   gl_code: string;
   owner_user_id: string;
   sort_by: string;
+  sort_dir: "asc" | "desc";
   page: number;
   source: string;
   bucket: string;
@@ -22,7 +24,7 @@ export type InvoiceQueryPatch = Partial<InvoiceQueryState>;
 
 const defaults: InvoiceQueryState = {
   status: "", vendor_id: "", due_date_from: "", due_date_to: "", amount_min: "", amount_max: "",
-  gl_code: "", owner_user_id: "", sort_by: "date_received", page: 1, source: "all", bucket: "ready_to_pay", search: "",
+  gl_code: "", owner_user_id: "", sort_by: "due_date", sort_dir: "asc", page: 1, source: "all", bucket: "ready_to_pay", search: "",
 };
 const stateKeys = Object.keys(defaults) as (keyof InvoiceQueryState)[];
 
@@ -38,7 +40,10 @@ function readQuery(): InvoiceQueryState {
     amount_max: params.get("amount_max") || "",
     gl_code: params.get("gl_code") || "",
     owner_user_id: params.get("owner_user_id") || "",
-    sort_by: params.get("sort_by") || (params.get("bucket") === "overdue" ? "days_overdue" : "date_received"),
+    sort_by: params.get("sort_by") || (params.get("bucket") === "overdue" ? "days_overdue" : defaults.sort_by),
+    sort_dir: params.get("sort_dir") === "asc" || params.get("sort_dir") === "desc"
+      ? params.get("sort_dir") as SortDirection
+      : params.get("bucket") === "overdue" ? "desc" : defaults.sort_dir,
     page: Math.max(1, Number(params.get("page") || 1) || 1),
     source: params.get("source") || "all",
     bucket: params.get("bucket") || "ready_to_pay",
@@ -61,7 +66,7 @@ export function useInvoiceQueryState() {
     const params = new URLSearchParams(window.location.search);
     for (const key of stateKeys) {
       const value = next[key];
-      if (value === "" || value === "all" || (key === "page" && value === 1) || (key === "sort_by" && value === defaults.sort_by)) params.delete(key);
+      if (value === "" || value === "all" || (key === "page" && value === 1) || (key === "sort_by" && value === defaults.sort_by) || (key === "sort_dir" && value === defaults.sort_dir)) params.delete(key);
       else params.set(key, String(value));
     }
     const query = params.toString();
@@ -71,7 +76,7 @@ export function useInvoiceQueryState() {
 
   const clear = useCallback(() => update({
     status: "", vendor_id: "", due_date_from: "", due_date_to: "", amount_min: "", amount_max: "",
-    gl_code: "", owner_user_id: "", sort_by: defaults.sort_by, page: 1, source: "all", bucket: "ready_to_pay", search: "",
+    gl_code: "", owner_user_id: "", sort_by: defaults.sort_by, sort_dir: defaults.sort_dir, page: 1, source: "all", bucket: "ready_to_pay", search: "",
   }, false), [update]);
 
   return { filters, update, clear };
@@ -147,6 +152,7 @@ const sorts = [
   ["due_date", "Due date"], ["amount", "Amount"], ["days_overdue", "Days overdue"], ["confidence", "Confidence"], ["date_received", "Date received"],
 ];
 
-export function SortControl({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <label className="sort-control">Sort by<select aria-label="Sort invoices by" value={value} onChange={event => onChange(event.target.value)}>{sorts.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><span className="sort-direction-note">API default order</span></label>;
+export function SortControl({ value, sortDir = "asc", onChange, onSortDirChange }: { value: string; sortDir?: "asc" | "desc"; onChange: (value: string) => void; onSortDirChange?: (value: "asc" | "desc") => void }) {
+  const label = sorts.find(([key]) => key === value)?.[1] || "Due date";
+  return <div className="sort-control"><label>Sort by<select aria-label="Sort invoices by" value={value} onChange={event => onChange(event.target.value)}>{sorts.map(([key, optionLabel]) => <option key={key} value={key}>{optionLabel}</option>)}</select></label><button type="button" className="sort-direction-toggle" aria-label={defaultSortLabel(label, sortDir)} aria-pressed={sortDir === "desc"} onClick={() => onSortDirChange?.(toggleSortDirection(sortDir))}>{sortDir === "asc" ? "Ascending ↑" : "Descending ↓"}</button></div>;
 }

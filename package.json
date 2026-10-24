@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:auth-session": "node --experimental-strip-types --test tests/auth-session.test.mjs",
+    "test:ui-controls": "node --experimental-strip-types --test tests/ui-controls.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

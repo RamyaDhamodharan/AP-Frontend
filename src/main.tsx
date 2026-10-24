@@ -161,6 +161,7 @@ function App() {
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
   }, [activePage]);
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
+  const [invoiceDrawerTab, setInvoiceDrawerTab] = useState<"details" | "timeline">("details");
   const [noMatchDraft, setNoMatchDraft] = useState<NoMatchDraft | null>(null);
   const [emailDraftEditor, setEmailDraftEditor] = useState<EmailDraftDetail | null>(null);
   const [emailDraftSubject, setEmailDraftSubject] = useState("");
@@ -606,17 +607,23 @@ function App() {
   async function openDocument(doc: Doc) {
     setSelectedDoc(doc); setModalError(""); setDetailLoading(true);
     try {
+      if (doc.linked_invoice_id) {
+        setSelectedDoc(null);
+        await openInvoice(doc.linked_invoice_id, "timeline");
+        return;
+      }
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
       if (response.data.linked_invoice_id) {
         setSelectedDoc(null);
-        await openInvoice(response.data.linked_invoice_id);
+        await openInvoice(response.data.linked_invoice_id, "timeline");
         return;
       }
       setSelectedDoc(response.data);
     } catch (error) { setModalError(getError(error, "Could not load document details.")); }
     finally { setDetailLoading(false); }
   }
-  async function openInvoice(invoiceId: string) {
+  async function openInvoice(invoiceId: string, initialTab: "details" | "timeline" = "details") {
+    setInvoiceDrawerTab(initialTab);
     setNoMatchDraft(null); setEmailDraftEditor(null); setEmailDraftOpened(false); setEmailDraftError("");
     try {
       const [detail, candidates] = await Promise.all([
@@ -827,13 +834,12 @@ function App() {
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
           {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads…"/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => doc.linked_invoice_id ? void openInvoice(doc.linked_invoice_id) : void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); doc.linked_invoice_id ? void openInvoice(doc.linked_invoice_id) : void openDocument(doc); } }}>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
               <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
-              <div className="document-card-meta">
-                <span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span>
-                <span className="document-card-reason" title={doc.failure_message || undefined}>{doc.failure_message || (isProcessing(doc.status) ? "Processing. Status refreshes automatically." : doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>
+              <div className="document-card-status"><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span>
                 {doc.status === "failed" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title="Retry processing" onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading}><RetryIcon/></button>}
               </div>
+              <span className="document-card-reason" title={doc.failure_message || undefined}>{doc.failure_message || (isProcessing(doc.status) ? "Processing. Status refreshes automatically." : doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>
             </article>)}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
           </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "Upload up to 5 bills to get started"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
@@ -852,6 +858,7 @@ function App() {
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer
           invoice={selectedInvoice}
+          initialTab={invoiceDrawerTab}
           authHeaders={authHeaders}
           candidates={matchCandidates}
           noMatchDraft={noMatchDraft}
@@ -1105,8 +1112,9 @@ function InvoiceComparisonRow({ item, currency }: { item: NonNullable<InvoiceDet
   const cls = item.resolved ? "matched" : item.severity === "error" ? "mismatch" : "within-tolerance";
   return <tr className={`comparison-row comparison-row-${cls}`}><td>{humanize(item.field)}</td><td>{render(item.invoice_value)}</td><td>{render(item.po_value)}</td><td>{render(item.gr_value)}</td><td><span className={`comparison-result ${cls}`}>{result}</span></td></tr>;
 }
-function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string } }) {
-  const [activeTab, setActiveTab] = useState<"details" | "timeline">("details");
+function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; initialTab: "details" | "timeline"; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string } }) {
+  const [activeTab, setActiveTab] = useState<"details" | "timeline">(initialTab);
+  useEffect(() => setActiveTab(initialTab), [initialTab, invoice.invoice_id]);
   const rows = [...(invoice.discrepancies || [])].sort((a, b) => Number(Boolean(a.resolved)) - Number(Boolean(b.resolved)) || (a.severity === "error" ? -1 : 1));
   const issues = rows.filter(item => !item.resolved);
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];

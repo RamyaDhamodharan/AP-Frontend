@@ -25,6 +25,7 @@ export function userFacingErrorMessage(error: unknown, fallback = "The request c
     case 415: return "This file type is not supported. Choose a supported file and try again.";
     case 422: return "Something went wrong with this file. Please retry or upload it again.";
     case 429: return "Too many requests. Wait a moment and try again.";
+    case 409: return "This conflicts with an existing record. Check the name or tax ID and try again.";
     default: return (response.status || 0) >= 500
       ? "The service is temporarily unavailable. Wait a moment, then try again."
       : fallback;

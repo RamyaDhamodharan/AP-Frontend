@@ -7,6 +7,9 @@ import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, t
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { ProcurementWorkspacePage } from "./components/ProcurementWorkspacePage";
+import { VendorsPage } from "./components/VendorsPage";
+import { SourceFileActions } from "./components/SourceFileActions";
+import { UnknownVendorPrompt, type UnknownVendorInfo } from "./components/UnknownVendorPrompt";
 import { LogsPage } from "./components/LogsPage";
 import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
@@ -14,6 +17,7 @@ import { isDocxFilename, isSupportedUploadFilename, uploadLimitMessage } from ".
 import { userFacingErrorMessage } from "./errorMessages";
 import { documentActionAvailability, isValidDocumentId } from "./documentIds";
 import { documentDetailSectionTitle, linkedRecordDestination } from "./documentNavigation";
+import { vendorMatches } from "./vendorMatching";
 import { Sidebar, type WorkspacePage } from "./components/Sidebar";
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CircleAlert, CircleCheck,
@@ -60,7 +64,7 @@ type Doc = {
 };
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
-type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: { description?: string | null; item_code?: string | null; qty?: number | string | null; unit_price?: number | string | null; amount?: number | string | null }[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[] };
+type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: { description?: string | null; item_code?: string | null; qty?: number | string | null; unit_price?: number | string | null; amount?: number | string | null }[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[]; match_outcome?: { outcome?: string; rule_set_version?: string; confidence_level?: string; low_confidence_fields?: string[]; discrepancies?: { code: string; message: string; invoice_value?: unknown; expected_value?: unknown; difference?: unknown; tolerance?: unknown; line_reference?: string | null; next_action?: string }[] } | null };
 type NoMatchDraft = { id: string; status: string; kind: string };
 type EmailDraftDetail = NoMatchDraft & { subject: string; body: string; to_addresses: string[]; cc_addresses?: string[] };
 type EmailMessageItem = { id: string; sender?: string | null; subject?: string | null; status: string; filter_reason?: string | null; failure_reason?: string | null; received_at?: string | null; retryable: boolean; document_id?: string | null; linked_invoice_id?: string | null; linked_invoice_status?: string | null };
@@ -119,7 +123,7 @@ function emailPollCount(status: EmailStatus | null, key: string, fallback: strin
   return typeof value === "number" ? value : 0;
 }
 function App() {
-  const [activePage, setActivePage] = useState<WorkspacePage>(() => { const page = new URLSearchParams(window.location.search).get("page"); return ["logs", "purchase-orders", "goods-receipts"].includes(page || "") ? page as WorkspacePage : "dashboard"; });
+  const [activePage, setActivePage] = useState<WorkspacePage>(() => { const page = new URLSearchParams(window.location.search).get("page"); return ["logs", "purchase-orders", "goods-receipts", "vendors"].includes(page || "") ? page as WorkspacePage : "dashboard"; });
   const { filters: invoiceQuery, update: updateInvoiceQuery } = useInvoiceQueryState();
   const invoiceSource = (invoiceQuery.source || "all") as "all" | "upload" | "email";
   const [globalSearch, setGlobalSearch] = useState(invoiceQuery.search || "");
@@ -159,7 +163,7 @@ function App() {
   const setInvoiceSource = (source: "all" | "upload" | "email") => updateInvoiceQuery({ source });
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (["logs", "purchase-orders", "goods-receipts"].includes(activePage)) params.set("page", activePage); else params.delete("page");
+    if (["logs", "purchase-orders", "goods-receipts", "vendors"].includes(activePage)) params.set("page", activePage); else params.delete("page");
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
   }, [activePage]);
@@ -195,6 +199,9 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isDraggingDocuments, setIsDraggingDocuments] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  const [unknownVendor, setUnknownVendor] = useState<UnknownVendorInfo | null>(null);
+  const [unknownVendorBusy, setUnknownVendorBusy] = useState(false);
+  const [unknownVendorError, setUnknownVendorError] = useState("");
   const [filePreview, setFilePreview] = useState<{ url: string; filename: string } | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [modalError, setModalError] = useState("");
@@ -393,7 +400,7 @@ function App() {
         axios.get<{ items: CommandBill[]; total: number; page: number; page_size: number }>(`${CORE_URL}/api/command-center/bills?${query}`, { headers: authHeaders() }),
       ]);
       const allBuckets = summaryResponse.data.buckets || {};
-      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
+      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, needs_review: allBuckets.needs_review, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
       const items = listResponse.data.items || [];
       setCommandBills(items);
       setCommandTotal(listResponse.data.total || 0);
@@ -625,12 +632,56 @@ function App() {
   }
   const [uploadResult, setUploadResult] = useState<{ outcomes: { name: string; ok: boolean; message?: string }[]; successes: number; total: number } | null>(null);
 
+  async function checkUnknownVendor(info: UnknownVendorInfo) {
+    if (!info.vendorName.trim() && !info.taxId.trim()) return;
+    const key = `ap-unknown-vendor:${info.recordType}:${info.recordId}`;
+    try { if (sessionStorage.getItem(key)) return; } catch { /* Continue without session storage. */ }
+    try {
+      const response = await axios.get<{ id: string; name: string; tax_id?: string | null }[]>(`${CORE_URL}/api/vendors`, { params: { search: info.taxId || info.vendorName, page: 1, page_size: 100 }, headers: authHeaders() });
+      if (vendorMatches({ name: info.vendorName, tax_id: info.taxId }, response.data)) return;
+      try { sessionStorage.setItem(key, "shown"); } catch { /* Session storage may be unavailable. */ }
+      setUnknownVendor(info); setUnknownVendorError("");
+    } catch (error) { notify(getError(error, "Could not check the vendor directory."), "error"); }
+  }
+  async function addUnknownVendor(values: { name: string; tax_id: string }) {
+    if (!unknownVendor || !values.name.trim()) return;
+    setUnknownVendorBusy(true); setUnknownVendorError("");
+    try {
+      const created = await axios.post<{ id: string }>(`${CORE_URL}/api/vendors`, { name: values.name, tax_id: values.tax_id || null }, { headers: authHeaders() });
+      const info = unknownVendor; const documentId = info.sourceDocumentId || (info.recordType === "document" ? info.recordId : null);
+      const retryable = ["failed", "needs_data_review", "needs_vendor_review", "incomplete"].includes((info.status || "").toLowerCase());
+      if (info.recordType === "purchase_order" && info.linkedId) {
+        await axios.patch(`${CORE_URL}/api/purchase-orders/${info.linkedId}/vendor`, { vendor_id: created.data.id }, { headers: authHeaders() });
+        if (documentId) await axios.post(`${CORE_URL}/api/document-workflows/${documentId}/decisions`, { action: "retry_match", reason: "Vendor added after explicit confirmation" }, { headers: authHeaders() });
+      } else if ((info.recordType === "document" && info.docType === "po" && !retryable) && documentId) {
+        await axios.post(`${CORE_URL}/api/documents/${documentId}/resolve-po-vendor`, { vendor_id: created.data.id }, { headers: authHeaders() });
+      } else if (info.recordType === "invoice" && info.linkedId) {
+        await axios.patch(`${CORE_URL}/api/invoices/${info.linkedId}`, { vendor_id: created.data.id }, { headers: authHeaders() });
+      } else if (info.recordType === "goods_receipt" && info.linkedId && documentId) {
+        if (info.linkedPoId) await axios.patch(`${CORE_URL}/api/purchase-orders/${info.linkedPoId}/vendor`, { vendor_id: created.data.id }, { headers: authHeaders() });
+        await axios.patch(`${CORE_URL}/api/goods-receipts/${info.linkedId}`, { vendor_id: created.data.id }, { headers: authHeaders() });
+        await axios.post(`${CORE_URL}/api/document-workflows/${documentId}/decisions`, { action: "retry_match", reason: "Vendor added after explicit confirmation" }, { headers: authHeaders() });
+      } else if (documentId && retryable) {
+        await axios.post(`${CORE_URL}/api/documents/${documentId}/retry`, {}, { headers: authHeaders() });
+      } else if (documentId) {
+        await axios.post(`${CORE_URL}/api/document-workflows/${documentId}/decisions`, { action: "retry_match", reason: "Vendor added after explicit confirmation" }, { headers: authHeaders() });
+      }
+      setUnknownVendor(null); notify("Vendor added. Matching has been requested.", "success");
+      if (info.recordType === "invoice" && info.linkedId) await openInvoice(info.linkedId);
+      if ((info.recordType === "purchase_order" || info.recordType === "goods_receipt") && info.linkedId) setProcurementRecordId(info.linkedId);
+      await Promise.all([loadDocuments(1), loadInvoices()]);
+    } catch (error) { setUnknownVendorError(getError(error, "Could not add or match this vendor.")); }
+    finally { setUnknownVendorBusy(false); }
+  }
+
   async function openDocument(doc: Doc) {
     setSelectedDoc(doc); setModalError(""); setDetailLoading(true);
     try {
       if (!isValidDocumentId(doc.id)) return;
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
       const detail = response.data;
+      const extracted = detail.extracted_json || {};
+      void checkUnknownVendor({ recordId: detail.linked_invoice_id || detail.linked_po_id || detail.linked_gr_id || detail.id!, recordType: detail.linked_invoice_id ? "invoice" : detail.linked_po_id ? "purchase_order" : detail.linked_gr_id ? "goods_receipt" : "document", docType: detail.doc_type, linkedId: detail.linked_invoice_id || detail.linked_po_id || detail.linked_gr_id, sourceDocumentId: detail.id, status: detail.status, vendorName: String(extracted.vendor || extracted.vendor_name || ""), taxId: String(extracted.vendor_tax_id || extracted.tax_id || ""), filename: detail.original_filename });
       const destination = linkedRecordDestination(detail);
       if (destination?.page === "invoices") {
         setSelectedDoc(null);
@@ -654,6 +705,11 @@ function App() {
         axios.get<{ candidates: MatchCandidate[] }>(`${CORE_URL}/api/invoices/${invoiceId}/match-candidates`, { headers: authHeaders() }),
       ]);
       setSelectedInvoice(detail.data); setMatchCandidates(candidates.data.candidates || []);
+      if (detail.data.vendor_name || detail.data.vendor_tax_id) {
+        let filename = "";
+        if (detail.data.source_document_id) { try { const source = await axios.get<Doc>(`${CORE_URL}/api/documents/${detail.data.source_document_id}`, { headers: authHeaders() }); filename = source.data.original_filename || ""; } catch { /* Invoice details remain available without source metadata. */ } }
+        void checkUnknownVendor({ recordId: detail.data.invoice_id, recordType: "invoice", linkedId: detail.data.invoice_id, sourceDocumentId: detail.data.source_document_id, status: detail.data.workflow_status || detail.data.status, vendorName: detail.data.vendor_name || "", taxId: detail.data.vendor_tax_id || "", filename });
+      }
       if (detail.data.status === "rejected") {
         try {
           const drafts = await axios.get<{ items?: NoMatchDraft[] }>(`${CORE_URL}/api/email-drafts`, { params: { invoice: invoiceId, kind: "no_match", status: "draft", page: 1, page_size: 10 }, headers: authHeaders() });
@@ -743,6 +799,15 @@ function App() {
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (error) { notify(getError(error, "Could not download the original file."), "error"); }
   }
+  async function openOriginalSource(sourceDocumentId: string | null | undefined, download = false) {
+    if (!isValidDocumentId(sourceDocumentId)) return;
+    try {
+      const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${sourceDocumentId}`, { headers: authHeaders() });
+      const source = { ...response.data, id: sourceDocumentId };
+      if (download || isDocxFilename(source.original_filename)) await downloadOriginalFile(source);
+      else await openOriginalFile(source);
+    } catch (error) { notify(getError(error, "Could not open the original file."), "error"); }
+  }
   async function retryDocument(doc: Doc) {
     if (!isValidDocumentId(doc.id)) return;
     try {
@@ -824,6 +889,15 @@ function App() {
     if (page === "invoices" && activePage !== "invoices" && invoiceQuery.status && !invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) updateInvoiceQuery({ status: "" });
   }
 
+  async function checkProcurementVendor(kind: "purchase_order" | "goods_receipt", row: { id: string; source_document_id?: string | null; vendor_name?: string | null }, purchaseOrder?: { vendor_name?: string | null }) {
+    let source: Doc | null = null;
+    if (row.source_document_id && isValidDocumentId(row.source_document_id)) {
+      try { source = (await axios.get<Doc>(`${CORE_URL}/api/documents/${row.source_document_id}`, { headers: authHeaders() })).data; } catch { /* Keep the procurement drawer usable without source details. */ }
+    }
+    const extracted = source?.extracted_json || {};
+    void checkUnknownVendor({ recordId: row.id, recordType: kind, linkedId: row.id, linkedPoId: kind === "goods_receipt" ? (purchaseOrder as { id?: string } | undefined)?.id : undefined, sourceDocumentId: row.source_document_id, docType: source?.doc_type, status: source?.status, vendorName: String(extracted.vendor || extracted.vendor_name || row.vendor_name || purchaseOrder?.vendor_name || ""), taxId: String(extracted.vendor_tax_id || extracted.tax_id || ""), filename: source?.original_filename || "" });
+  }
+
   if (restoring && !token) return <main className="session-screen"><Loader title="Restoring secure session" subtitle="Checking your sign-in session…" /></main>;
   if (!token) return <main className="auth-shell page-enter">
     <section className="auth-hero"><div className="brand brand-light"><span className="brand-mark">G</span><span>GENWORX<small>FINANCE AUTOMATION</small></span></div><div className="hero-copy"><span className="eyebrow">ACCOUNTS PAYABLE WORKSPACE</span><h1>Clarity for every<br /><em>invoice and document.</em></h1><p>Bring your documents together, track invoice progress, and spot issues without losing sight of the source evidence.</p><div className="hero-points"><span><Check {...iconProps}/> Secure workspace</span><span><Check {...iconProps}/> Clear processing status</span><span><Check {...iconProps}/> Human-reviewed decisions</span></div></div><div className="hero-orbit"><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="orbit-file"><FileText {...iconProps}/></div><span className="orbit-dot dot-one"/><span className="orbit-dot dot-two"/><span className="orbit-dot dot-three"/></div></section>
@@ -840,9 +914,9 @@ function App() {
 
   return <div className="app-shell">
     <Sidebar activePage={activePage} isAdmin={canSeeAdminNavigation(profile?.role)} documentCount={docTotal} invoiceCount={Object.values(invoiceCounts).reduce((sum, count) => sum + count, 0)} emailAttentionCount={emailStatus?.counts?.needs_attention || 0} name={profile?.name || ""} email={email} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} onNavigate={navigateTo} onSignOut={() => void logout()} signOutDisabled={authBusy}/>
-    <main className="main-area"><header className="topbar"><button type="button" className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "purchase-orders" ? "Purchase Orders" : activePage === "goods-receipts" ? "Goods Receipts" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
+    <main className="main-area"><header className="topbar"><button type="button" className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "vendors" ? "Vendors" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "purchase-orders" ? "Purchase Orders" : activePage === "goods-receipts" ? "Goods Receipts" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
       <div className="content">
-      {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={{ ...Object.fromEntries(associates.map(user => [user.id, user.name])), ...(readAccessClaims(token)?.sub ? { [readAccessClaims(token)!.sub]: profile?.name || profile?.email || "Admin" } : {}) }} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "purchase-orders" ? <ProcurementWorkspacePage kind="purchase_order" coreUrl={CORE_URL} authHeaders={authHeaders} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "goods-receipts" ? <ProcurementWorkspacePage kind="goods_receipt" coreUrl={CORE_URL} authHeaders={authHeaders} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
+      {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={{ ...Object.fromEntries(associates.map(user => [user.id, user.name])), ...(readAccessClaims(token)?.sub ? { [readAccessClaims(token)!.sub]: profile?.name || profile?.email || "Admin" } : {}) }} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "purchase-orders" ? <ProcurementWorkspacePage kind="purchase_order" coreUrl={CORE_URL} authHeaders={authHeaders} onViewOriginal={id => void openOriginalSource(id)} onDownloadOriginal={id => void openOriginalSource(id, true)} onCheckVendor={(kind, row, po) => void checkProcurementVendor(kind, row, po)} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "vendors" && profile?.role === "admin" ? <VendorsPage coreUrl={CORE_URL} authHeaders={authHeaders} isAdmin={canSeeAdminNavigation(profile?.role)}/> : activePage === "goods-receipts" ? <ProcurementWorkspacePage kind="goods_receipt" coreUrl={CORE_URL} authHeaders={authHeaders} onViewOriginal={id => void openOriginalSource(id)} onDownloadOriginal={id => void openOriginalSource(id, true)} onCheckVendor={(kind, row, po) => void checkProcurementVendor(kind, row, po)} invoices={invoices} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setProcurementRecordId(id); setActivePage("purchase-orders"); }} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)}/> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
         <section className="panel admin-associate-panel">
           <div className="panel-head"><div><span className="eyebrow purple">ADMINISTRATION</span><h2>Add an associate</h2><p className="muted">Temporary password is valid for 24 hours. The associate must change it at first sign in.</p></div></div>
           <form className="toolbar" onSubmit={createAssociate}>
@@ -891,6 +965,7 @@ function App() {
       </div>
     </main>
     {toast && <div className={`toast ${toast.kind}`} role="status"><span className="toast-symbol">{toast.kind === "success" ? <CircleCheck {...iconProps}/> : toast.kind === "error" ? <CircleAlert {...iconProps}/> : <CircleHelp {...iconProps}/>}</span><span>{toast.text}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X {...iconProps}/></button></div>}
+    {unknownVendor && <UnknownVendorPrompt info={unknownVendor} isAdmin={canSeeAdminNavigation(profile?.role)} busy={unknownVendorBusy} error={unknownVendorError} onAdd={values => void addUnknownVendor(values)} onClose={() => setUnknownVendor(null)}/>}
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
@@ -903,6 +978,9 @@ function App() {
           invoice={selectedInvoice}
           initialTab={invoiceDrawerTab}
           authHeaders={authHeaders}
+          coreUrl={CORE_URL}
+          onViewOriginal={id => void openOriginalSource(id)}
+          onDownloadOriginal={id => void openOriginalSource(id, true)}
           candidates={matchCandidates}
           noMatchDraft={noMatchDraft}
           onReviewNoMatchDraft={() => void reviewNoMatchDraft()}
@@ -1159,7 +1237,7 @@ function InvoiceComparisonRow({ item, currency }: { item: NonNullable<InvoiceDet
   const cls = item.resolved ? "matched" : item.severity === "error" ? "mismatch" : "within-tolerance";
   return <tr className={`comparison-row comparison-row-${cls}`}><td>{humanize(item.field)}</td><td>{render(item.invoice_value)}</td><td>{render(item.po_value)}</td><td>{render(item.gr_value)}</td><td><span className={`comparison-result ${cls}`}>{result}</span></td></tr>;
 }
-function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; initialTab: "details" | "timeline"; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string } }) {
+function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders, coreUrl, onViewOriginal, onDownloadOriginal }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; initialTab: "details" | "timeline"; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string }; coreUrl: string; onViewOriginal: (id: string | null | undefined) => void; onDownloadOriginal: (id: string | null | undefined) => void }) {
   const [activeTab, setActiveTab] = useState<"details" | "timeline">(initialTab);
   useEffect(() => setActiveTab(initialTab), [initialTab, invoice.invoice_id]);
   const rows = [...(invoice.discrepancies || [])].sort((a, b) => Number(Boolean(a.resolved)) - Number(Boolean(b.resolved)) || (a.severity === "error" ? -1 : 1));
@@ -1167,13 +1245,14 @@ function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, initialTab, on
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];
   const hasNoReceipt = issues.some(item => item.field.includes("accepted_quantity") || item.field.includes("goods_receipt"));
   return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice"><X {...iconProps}/></button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></div>
-    <Tabs label="Invoice details" tabs={[{ id: "details", label: "Details" }, { id: "timeline", label: "Timeline" }]} value={activeTab} onChange={setActiveTab}/>
+    <SourceFileActions sourceDocumentId={invoice.source_document_id} coreUrl={coreUrl} authHeaders={authHeaders} onView={onViewOriginal} onDownload={onDownloadOriginal}/><Tabs label="Invoice details" tabs={[{ id: "details", label: "Details" }, { id: "timeline", label: "Timeline" }]} value={activeTab} onChange={setActiveTab}/>
     {activeTab === "timeline" ? <InvoiceTimeline invoiceId={invoice.invoice_id} sourceDocumentId={invoice.source_document_id} coreUrl={CORE_URL} authHeaders={authHeaders}/> : <>
     {noMatchDraft && <div className="notice info no-match-draft-banner"><strong>Draft ready to review</strong><p>A no-match email is ready. Review and edit it before sending.</p><Button variant="secondary" onClick={onReviewNoMatchDraft}>Review email draft</Button></div>}
     {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}
     <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{labels.map(([label, keys]) => { const value = keys.map(key => invoice[key]).find(item => item != null && item !== ""); if (value == null || (typeof value !== "string" && typeof value !== "number")) return null; const shown = ["invoice_date", "due_date"].includes(String(keys[0])) ? dateLabel(String(value)) : String(value); return <DetailField key={label} label={label} value={shown}/>; })}</div></section>
     <section className="extracted-section"><h3 className="section-title">Amounts</h3><div className="field-grid"><DetailField label="Subtotal" value={invoice.subtotal == null ? undefined : formatInvoiceMoney(invoice.subtotal, invoice.currency)}/><DetailField label="Tax" value={invoice.tax_amount == null ? undefined : formatInvoiceMoney(invoice.tax_amount, invoice.currency)}/><DetailField label="Total" value={invoice.total_amount == null ? undefined : formatInvoiceMoney(invoice.total_amount, invoice.currency)}/></div></section>
     {(invoice.line_items || []).length > 0 && <section className="extracted-section"><h3 className="section-title">Line Items</h3><div className="table-wrap"><table className="line-items-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>{invoice.line_items!.map((line, index) => { const qty = Number(line.qty); return <tr key={index}><td>{line.description || line.item_code || ""}</td><td>{line.qty == null || !Number.isFinite(qty) ? "" : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(qty)}</td><td>{line.unit_price == null ? "" : formatInvoiceMoney(line.unit_price, invoice.currency)}</td><td>{line.amount == null ? "" : formatInvoiceMoney(line.amount, invoice.currency)}</td></tr>; })}</tbody></table></div></section>}
+    {invoice.match_outcome?.discrepancies && <section className="extracted-section"><h3 className="section-title">Discrepancies</h3>{invoice.match_outcome.discrepancies.length ? <div className="table-wrap"><table className="comparison-table"><thead><tr><th>Issue</th><th>Invoice value</th><th>PO/GR value</th><th>Difference</th><th>Next action</th></tr></thead><tbody>{invoice.match_outcome.discrepancies.map((item, index) => <tr key={`${item.code}-${item.line_reference || index}`}><td>{item.message}{item.line_reference ? ` (${item.line_reference})` : ""}</td><td>{safeCompareValue(item.invoice_value)}</td><td>{safeCompareValue(item.expected_value)}</td><td>{safeCompareValue(item.difference)}</td><td>{item.next_action || "Review the invoice."}</td></tr>)}</tbody></table></div> : <p>No matching discrepancies.</p>}{Boolean(invoice.match_outcome.low_confidence_fields?.length) && <><h4>Low-confidence fields</h4><ul>{invoice.match_outcome.low_confidence_fields?.map(field => <li key={field}>{humanize(field.replaceAll("_", " "))}</li>)}</ul></>}</section>}
     {rows.length > 0 && <section className="extracted-section"><h3 className="section-title">Match review</h3><div className="discrepancy-badges">{issues.map(item => <span key={`${item.field}-${item.reason}`} className={`discrepancy-badge ${item.severity === "error" ? "mismatch" : "within-tolerance"}`}>{item.field.includes("po_found") ? "No PO" : item.field.includes("unit_price") || item.field.includes("line_price") ? "Price mismatch" : item.field.includes("goods_receipt") || item.field.includes("accepted_quantity") ? "No goods receipt" : item.field.includes("quantity") ? "Qty exceeds PO" : humanize(item.field)}</span>)}</div><div className="table-wrap"><table className="comparison-table"><thead><tr><th>Field</th><th>Invoice</th><th>PO</th><th>Goods Receipt</th><th>Status</th></tr></thead><tbody>{issues.map(item => <InvoiceComparisonRow key={`${item.field}-${item.reason}`} item={item} currency={invoice.currency}/> )}</tbody></table></div>{rows.some(item => item.resolved) && <details className="matched-fields"><summary>Show matched fields ({rows.filter(item => item.resolved).length})</summary><div className="table-wrap"><table className="comparison-table"><thead><tr><th>Field</th><th>Invoice</th><th>PO</th><th>Goods Receipt</th><th>Status</th></tr></thead><tbody>{rows.filter(item => item.resolved).map(item => <InvoiceComparisonRow key={`${item.field}-${item.reason}`} item={item} currency={invoice.currency}/>)}</tbody></table></div></details>}</section>}
     {invoice.status === "needs_review" && !invoice.po_number_raw && candidates.length > 0 && <div className="suggestion-card"><small>SUGGESTED PURCHASE ORDER</small><h3>This invoice matches {candidates[0].po_number} ({candidates[0].vendor_name || "vendor"}, amount, items — {Math.round(candidates[0].score)}% match). Match this PO?</h3><p>Matched signals: vendor, total amount, and item descriptions.</p><div><button className="primary" onClick={() => onMatch(candidates[0], true)}>Yes, match this PO</button><button className="secondary" onClick={() => onMatch(candidates[0], false)}>No</button></div></div>}
     {invoice.status === "needs_review" && !invoice.po_number_raw && !candidates.length && <p className="muted">No match found for this invoice.</p>}

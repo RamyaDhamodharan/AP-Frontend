@@ -5,12 +5,7 @@ export function confidenceLabel(value: unknown): "High" | "Medium" | "Low" | "Un
       ? Number((value as { confidence?: unknown }).confidence)
       : Number(value);
   if (!Number.isFinite(numberValue)) return "Unverified";
-  if (numberValue >= 85) return "High";
-  if (numberValue >= 70) return "Medium";
+  if (numberValue >= 90) return "High";
+  if (numberValue >= 75) return "Medium";
   return "Low";
-}
-
-export function procurementStatusLabel(needsVerification?: boolean, vendorId?: string | null): "Needs verification" | "Vendor pending" | "Verified" {
-  if (!vendorId) return "Vendor pending";
-  return needsVerification ? "Needs verification" : "Verified";
 }

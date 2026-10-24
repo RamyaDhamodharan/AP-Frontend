@@ -8,7 +8,7 @@ import { documentActionAvailability, isValidDocumentId } from "../src/documentId
 import { documentDetailSectionTitle, linkedRecordDestination } from "../src/documentNavigation.ts";
 import { vendorMatches } from "../src/vendorMatching.ts";
 import { sourceFileActionAvailability, sourceFilePreviewMime, sourceFileViewerMode } from "../src/sourceFileActions.ts";
-import { confidenceLabel, procurementStatusLabel } from "../src/procurementControls.ts";
+import { confidenceLabel } from "../src/procurementControls.ts";
 import axios from "axios";
 
 test("Logs navigation and access are admin-only", () => {
@@ -111,12 +111,9 @@ test("document detail section headings follow document type", () => {
   assert.equal(documentDetailSectionTitle(null), "Document");
 });
 
-test("procurement rows expose verification and confidence labels", () => {
-  assert.equal(procurementStatusLabel(true, "vendor-1"), "Needs verification");
-  assert.equal(procurementStatusLabel(false, null), "Vendor pending");
-  assert.equal(procurementStatusLabel(false, "vendor-1"), "Verified");
-  assert.equal(confidenceLabel(85), "High");
-  assert.equal(confidenceLabel(70), "Medium");
-  assert.equal(confidenceLabel(69), "Low");
+test("invoice confidence labels use display thresholds without raw scores", () => {
+  assert.equal(confidenceLabel(90), "High");
+  assert.equal(confidenceLabel(75), "Medium");
+  assert.equal(confidenceLabel(74), "Low");
   assert.equal(confidenceLabel(undefined), "Unverified");
 });

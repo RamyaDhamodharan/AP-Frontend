@@ -20,6 +20,7 @@ export type WorkspacePage = "dashboard" | "command-center" | "documents" | "invo
 type Props = {
   activePage: WorkspacePage;
   isAdmin: boolean;
+  canAccessVendors: boolean;
   documentCount: number;
   invoiceCount: number;
   emailAttentionCount: number;
@@ -35,7 +36,7 @@ type Props = {
 const iconProps = { size: 18, strokeWidth: 1.75, "aria-hidden": true as const };
 
 export function Sidebar({
-  activePage, isAdmin, documentCount, invoiceCount, emailAttentionCount, name, email,
+  activePage, isAdmin, canAccessVendors, documentCount, invoiceCount, emailAttentionCount, name, email,
   mobileOpen, onMobileClose, onNavigate, onSignOut, signOutDisabled,
 }: Props) {
   const [userCollapsed, setUserCollapsed] = useState(() => {
@@ -67,7 +68,7 @@ export function Sidebar({
     { id: "invoices", label: "Invoices", icon: <Receipt {...iconProps}/>, count: invoiceCount },
     { id: "purchase-orders", label: "Purchase Orders", icon: <ClipboardList {...iconProps}/> },
     { id: "goods-receipts", label: "Goods Receipts", icon: <PackageCheck {...iconProps}/> },
-    ...(isAdmin ? [{ id: "vendors", label: "Vendors", icon: <Building2 {...iconProps}/> }] : []),
+    ...(canAccessVendors ? [{ id: "vendors", label: "Vendors", icon: <Building2 {...iconProps}/> }] : []),
     { id: "email", label: "Email inbox", icon: <Mail {...iconProps}/>, count: emailAttentionCount },
     ...(isAdmin ? [{ id: "associates", label: "Associates", icon: <Users {...iconProps}/> }] : []),
   ] as const;

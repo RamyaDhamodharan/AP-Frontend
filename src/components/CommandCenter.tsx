@@ -1,6 +1,8 @@
 import type { CSSProperties } from "react";
 import { Badge, Button, Card, EmptyState, Skeleton } from "./ui";
 import { InvoiceFilters, SortControl, type FilterOwner, type FilterVendor, type InvoiceQueryPatch, type InvoiceQueryState } from "./InvoiceFilters";
+import type { UnknownVendorInfo } from "./UnknownVendorPrompt";
+import { VendorResolutionBanner } from "./VendorResolutionBanner";
 
 export type CommandBucket = "ready_to_pay" | "needs_review" | "overdue" | "rejected";
 export type CommandSummary = { count: number; total_amount: number | string };
@@ -68,7 +70,7 @@ function titleStatus(value: string) {
 
 export function CommandCenter({
   bucket, summary, bills, total, page, pageSize, filters, vendors, owners, confidences, loading, error,
-  onBucket, onFilter, onVendorSearch, onPage, onRefresh, onOpen, onAction,
+  onBucket, onFilter, onVendorSearch, onPage, onRefresh, onOpen, onAction, vendorNotice, vendorVendors, canAddVendor, vendorBusy, vendorError, onAddVendor, onSelectVendor,
 }: {
   bucket: CommandBucket;
   summary: Partial<Record<CommandBucket, CommandSummary>>;
@@ -89,6 +91,13 @@ export function CommandCenter({
   onRefresh: () => void;
   onOpen: (invoiceId: string) => void;
   onAction: (bill: CommandBill, action: string) => void;
+  vendorNotice?: UnknownVendorInfo | null;
+  vendorVendors?: FilterVendor[];
+  canAddVendor?: boolean;
+  vendorBusy?: boolean;
+  vendorError?: string;
+  onAddVendor?: () => void;
+  onSelectVendor?: (id: string) => void;
 }) {
   const activeSummary = summary[bucket];
   const overdueSummary = summary.overdue;
@@ -112,7 +121,7 @@ export function CommandCenter({
       {buckets.map(item => <button key={item.id} type="button" role="tab" aria-selected={bucket === item.id} onClick={() => onBucket(item.id)}>{item.label}<b>{summary[item.id]?.count ?? 0}</b></button>)}
     </div>
     {bucket === "overdue" && <div className="command-overdue-alert" role="status"><span className="alert-strip"/><div><strong>{(overdueSummary?.count ?? 0).toLocaleString("en-IN")} invoices are overdue</strong><span>Total {money(overdueSummary?.total_amount)} <small>Currency not provided by summary API</small></span></div></div>}
-    <Card className="command-table-card">
+    <Card className="command-table-card">{vendorNotice && <VendorResolutionBanner info={vendorNotice} vendors={vendorVendors || []} canAddVendor={Boolean(canAddVendor)} busy={vendorBusy} error={vendorError} onAdd={onAddVendor || (() => undefined)} onSelect={onSelectVendor || (() => undefined)}/>}
       <div className="command-table-toolbar"><div><h2>{buckets.find(item => item.id === bucket)?.label}</h2><p className="muted">{total.toLocaleString("en-IN")} invoices</p></div><SortControl value={filters.sort_by} sortDir={filters.sort_dir} onChange={value => onFilter({ sort_by: value })} onSortDirChange={sort_dir => onFilter({ sort_dir })}/></div>
       <InvoiceFilters mode="command-center" filters={filters} vendors={vendors} owners={owners} resultCount={total} onChange={onFilter} onVendorSearch={onVendorSearch}/>
       {loading ? <div className="command-skeleton-table" role="status" aria-label="Loading invoices">{Array.from({ length: 6 }, (_, index) => <div className="command-skeleton-row" key={index}>{Array.from({ length: bucket === "overdue" ? 9 : 7 }, (_, cell) => <Skeleton key={cell}/>)}</div>)}</div>

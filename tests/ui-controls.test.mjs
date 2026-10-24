@@ -11,6 +11,7 @@ import { sourceFileActionAvailability, sourceFilePreviewMime, sourceFileViewerMo
 import { confidenceLabel } from "../src/procurementControls.ts";
 import { documentStatusLabel, isDocumentProcessing, isRetryScheduled } from "../src/documentStatus.ts";
 import axios from "axios";
+import { addAndResolveVendor } from "../src/vendorResolution.ts";
 
 test("Logs navigation and access are admin-only", () => {
   assert.equal(canSeeAdminNavigation("admin"), true);
@@ -25,6 +26,20 @@ test("vendor creation is available to authenticated admins and associates", () =
   assert.equal(canCreateVendor("associate"), true);
   assert.equal(canCreateVendor(null), false);
   assert.equal(canCreateVendor("viewer"), false);
+});
+
+test("associate vendor add resolves records in order and can clear the banner", async () => {
+  const calls = [];
+  let bannerVisible = true;
+  const created = await addAndResolveVendor({
+    name: "Extracted Vendor",
+    taxId: "GST-42",
+    create: async payload => { calls.push(["create", payload]); return { id: "v-1" }; },
+    resolve: async (id, payload) => { calls.push(["resolve", id, payload]); bannerVisible = false; },
+  });
+  assert.equal(created.id, "v-1");
+  assert.deepEqual(calls.map(call => call[0]), ["create", "resolve"]);
+  assert.equal(bannerVisible, false);
 });
 
 test("scheduled retries remain Processing without exposing attempt details", () => {

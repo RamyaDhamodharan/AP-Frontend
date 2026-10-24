@@ -19,7 +19,6 @@ import { isSupportedUploadFilename, uploadLimitMessage } from "./uploadLimits";
 import { userFacingErrorMessage } from "./errorMessages";
 import { documentActionAvailability, isValidDocumentId } from "./documentIds";
 import { documentDetailSectionTitle, linkedRecordDestination } from "./documentNavigation";
-import { vendorMatches } from "./vendorMatching";
 import { addAndResolveVendor } from "./vendorResolution";
 import { confidenceDisplay, groupLowConfidenceFields } from "./confidenceDisplay";
 import { documentStatusLabel, isDocumentProcessing, isProcessingStatus, isRetryScheduled } from "./documentStatus";
@@ -658,12 +657,14 @@ function App() {
   async function checkUnknownVendor(info: UnknownVendorInfo) {
     if (!info.vendorName.trim() && !info.taxId.trim()) return;
     const key = `ap-unknown-vendor:${info.recordType}:${info.recordId}`;
-    try { if (sessionStorage.getItem(key)) return; } catch { /* Continue without session storage. */ }
+    let alreadyShown = false;
+    try { alreadyShown = Boolean(sessionStorage.getItem(key)); } catch { /* Continue without session storage. */ }
     try {
-      const response = await axios.get<{ id: string; name: string; tax_id?: string | null }[]>(`${CORE_URL}/api/vendors`, { params: { search: info.taxId || info.vendorName, page: 1, page_size: 100 }, headers: authHeaders() });
-      if (vendorMatches({ name: info.vendorName, tax_id: info.taxId }, response.data)) return;
+      const response = await axios.get<{ status: string; vendor?: { id: string; name: string }; candidates?: { id: string; name: string }[] }>(`${CORE_URL}/api/vendors/resolve-extracted`, { params: { name: info.vendorName || undefined, tax_id: info.taxId || undefined }, headers: authHeaders() });
+      if (response.data.status === "resolved") { setUnknownVendor(current => current?.recordId === info.recordId ? null : current); return; }
+      if (alreadyShown) return;
       try { sessionStorage.setItem(key, "shown"); } catch { /* Session storage may be unavailable. */ }
-      setUnknownVendor(info); setUnknownVendorError("");
+      setUnknownVendor({ ...info, suggestedVendors: response.data.candidates || [] }); setUnknownVendorError("");
     } catch (error) { notify(getError(error, "Could not check the vendor directory.", { conflict: "vendor" }), "error"); }
   }
   async function addUnknownVendor(values: { name: string; tax_id: string }) {

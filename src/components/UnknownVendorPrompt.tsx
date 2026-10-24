@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Building2, X } from "lucide-react";
 
-export type UnknownVendorInfo = { recordId: string; recordType: "document" | "invoice" | "purchase_order" | "goods_receipt"; docType?: string | null; linkedId?: string | null; linkedPoId?: string | null; sourceDocumentId?: string | null; status?: string; vendorName: string; taxId: string; filename: string };
+export type UnknownVendorInfo = { recordId: string; recordType: "document" | "invoice" | "purchase_order" | "goods_receipt"; docType?: string | null; linkedId?: string | null; linkedPoId?: string | null; sourceDocumentId?: string | null; status?: string; vendorName: string; taxId: string; filename: string; suggestedVendors?: { id: string; name: string }[] };
 type VendorOption = { id: string; name: string };
 
 export function UnknownVendorPrompt({ info, canAddVendor, busy, error, vendors = [], onAdd, onSelectExisting, onClose }: { info: UnknownVendorInfo; canAddVendor: boolean; busy: boolean; error: string; vendors?: VendorOption[]; onAdd: (vendor: { name: string; tax_id: string }) => void; onSelectExisting?: (vendorId: string) => void; onClose: () => void }) {

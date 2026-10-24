@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { userFacingErrorMessage } from "../errorMessages";
+import { documentActionAvailability, isValidDocumentId } from "../documentIds";
 import { Badge, Button, EmptyState, Skeleton } from "./ui";
 
 export type InvoiceTimelineEntry = {
@@ -37,16 +39,6 @@ function timestamp(value?: string | null) {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
-function requestError(error: unknown) {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string") return detail;
-    if (error.response?.status === 403) return "You do not have access to this action.";
-    return error.response ? `The request failed. (HTTP ${error.response.status})` : "Cannot reach the AP service.";
-  }
-  return "The request could not be completed.";
-}
-
 export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumentId }: Props) {
   const [entries, setEntries] = useState<InvoiceTimelineEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,7 +55,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
       const response = await axios.get<InvoiceTimelineEntry[]>(`${coreUrl}/api/invoices/${invoiceId}/timeline`, { headers: authHeaders() });
       setEntries(Array.isArray(response.data) ? response.data : []);
     } catch (loadError) {
-      setError(requestError(loadError));
+      setError(userFacingErrorMessage(loadError));
       setEntries([]);
     } finally {
       setLoading(false);
@@ -79,7 +71,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
         const response = await axios.get<InvoiceTimelineEntry[]>(`${coreUrl}/api/invoices/${invoiceId}/timeline`, { headers: authHeaders() });
         if (active) setEntries(Array.isArray(response.data) ? response.data : []);
       } catch (loadError) {
-        if (active) { setError(requestError(loadError)); setEntries([]); }
+        if (active) { setError(userFacingErrorMessage(loadError)); setEntries([]); }
       } finally { if (active) setLoading(false); }
     }
     void load();
@@ -93,7 +85,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
 
   async function rerun(entry: InvoiceTimelineEntry) {
     const documentId = entry.entity_type === "document" ? entry.entity_id : sourceDocumentId;
-    if (!documentId) return;
+    if (!isValidDocumentId(documentId)) return;
     setRerunning(entry.id);
     setActionError("");
     setNotice("");
@@ -101,7 +93,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
       await axios.post(`${coreUrl}/api/documents/${documentId}/retry`, {}, { headers: authHeaders() });
       setNotice("Re-run requested. The document will update after processing.");
       await loadTimeline();
-    } catch (rerunError) { setActionError(requestError(rerunError)); }
+    } catch (rerunError) { setActionError(userFacingErrorMessage(rerunError)); }
     finally { setRerunning(null); }
   }
 
@@ -116,6 +108,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
       const result = entry.result === "success" || entry.result === "warning" || entry.result === "error" ? entry.result : "warning";
       const title = entry.step_name || (entry.entry_type === "state_change" ? entry.new_value?.workflow_status : null) || (entry.action === "invoice_match_run" && entry.run_no != null ? `Match run ${entry.run_no}` : entry.action);
       const documentId = entry.entity_type === "document" ? entry.entity_id : sourceDocumentId;
+      const actionState = documentActionAvailability(documentId);
       const canRerun = entry.entry_type === "pipeline_step" && result === "error";
       return <li className={`invoice-timeline-item ${result}`} key={`${entry.entry_type || "event"}-${entry.id}`}>
         <span className="invoice-timeline-marker" aria-hidden="true"/>
@@ -126,7 +119,7 @@ export function InvoiceTimeline({ invoiceId, coreUrl, authHeaders, sourceDocumen
           {entry.output_label && <p><strong>Output</strong><span>{entry.output_label}</span></p>}
           {entry.duration_ms != null && <p><strong>Duration</strong><span>{entry.duration_ms < 1000 ? `${entry.duration_ms} ms` : `${(entry.duration_ms / 1000).toFixed(2)} sec`}</span></p>}
           {entry.reason && <p className="invoice-timeline-reason"><strong>Reason</strong><span>{entry.reason}</span></p>}
-          {canRerun && (documentId ? <Button variant="secondary" disabled={rerunning === entry.id} onClick={() => void rerun(entry)}>{rerunning === entry.id ? "Requesting…" : "Re-run"}</Button> : <Button variant="secondary" disabled title="Not available yet">Re-run</Button>)}
+          {canRerun && <Button variant="secondary" disabled={rerunning === entry.id || actionState.disabled} title={actionState.title} onClick={() => void rerun(entry)}>{rerunning === entry.id ? "Requesting…" : "Re-run"}</Button>}
         </article>
       </li>;
     })}</ol>

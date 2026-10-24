@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { userFacingErrorMessage } from "../errorMessages";
 import { Badge, Button, Card, EmptyState, Skeleton } from "./ui";
 import { InvoiceTimeline } from "./InvoiceTimeline";
 import type { FilterOwner, FilterVendor } from "./InvoiceFilters";
@@ -74,16 +75,6 @@ function outputFor(summary?: Record<string, unknown> | null) {
   return values.slice(0, 3).join(" · ") || "—";
 }
 
-function errorText(error: unknown) {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string") return detail;
-    if (error.response?.status === 403) return "You do not have access";
-    return error.response ? `Could not load logs. (HTTP ${error.response.status})` : "Cannot reach the audit service.";
-  }
-  return "Could not load logs.";
-}
-
 function rowInvoiceId(entry: AuditEntry) {
   if (entry.entity_type === "invoice") return entry.entity_id || null;
   const value = entry.output_summary?.invoice_id || entry.new_value?.invoice_id;
@@ -144,7 +135,7 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
         setItems(response.data.items || []); setTotal(response.data.total || 0);
       } catch (loadError) {
         if (!current) return;
-        setError(loadError instanceof Error && !axios.isAxiosError(loadError) ? loadError.message : errorText(loadError));
+        setError(userFacingErrorMessage(loadError, "Could not load logs. Refresh and try again."));
         setItems([]); setTotal(0);
       } finally { if (current) setLoading(false); }
     }

@@ -10,6 +10,8 @@ import { LogsPage } from "./components/LogsPage";
 import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
 import { uploadLimitMessage } from "./uploadLimits";
+import { userFacingErrorMessage } from "./errorMessages";
+import { documentActionAvailability, isValidDocumentId } from "./documentIds";
 import { Sidebar, type WorkspacePage } from "./components/Sidebar";
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CircleAlert, CircleCheck,
@@ -47,7 +49,7 @@ axios.interceptors.response.use(undefined, async (error: AxiosError) => {
 });
 
 type Doc = {
-  id: string; original_filename: string; status: string; doc_type?: string | null;
+  id?: string | null; local_key?: string; original_filename: string; status: string; doc_type?: string | null;
   created_at?: string | null; updated_at?: string | null; failure_message?: string | null;
   extracted_json?: Record<string, unknown> | null; raw_text?: string | null;
   source?: string | null; email_sender?: string | null; email_subject?: string | null;
@@ -75,16 +77,7 @@ function readAccessClaims(token: string): AccessClaims | null {
   } catch { return null; }
 }
 
-function getError(error: unknown, fallback: string) {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") return JSON.stringify(detail);
-    if (!error.response) return `Cannot reach the API. Check that AP-Core/AP-Auth are running and the frontend API URLs are correct. (${error.message})`;
-    return error.message || fallback;
-  }
-  return fallback;
-}
+const getError = userFacingErrorMessage;
 function humanize(value?: string | null) {
   if (!value) return "Unknown";
   return value.replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase());
@@ -155,6 +148,7 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; kind: "success" | "error" | "info" } | null>(null);
   const [documents, setDocuments] = useState<Doc[]>([]);
+  const [localFailedDocuments, setLocalFailedDocuments] = useState<Doc[]>([]);
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
   const [invoiceCounts, setInvoiceCounts] = useState<Record<InvoiceItem["status"], number>>({ processing: 0, needs_review: 0, ready_to_pay: 0, on_hold: 0, rejected: 0 });
   const [invoiceLoading, setInvoiceLoading] = useState(false);
@@ -286,10 +280,10 @@ function App() {
     if (!token) return;
     setDocLoading(true); setDocError("");
     try {
-      const batchItems = docSource === "email" ? [] : await Promise.all(recentBatchIds.map(id =>
+      const batchItems = docSource === "email" ? [] : await Promise.all(recentBatchIds.filter(isValidDocumentId).map(id =>
         axios.get<Doc>(`${CORE_URL}/api/documents/${encodeURIComponent(id)}`, { headers: authHeaders() }).then(result => result.data),
       ));
-      let visibleItems = batchItems;
+      let visibleItems = docSource === "latest" ? [...batchItems, ...localFailedDocuments] : batchItems;
       let visibleTotal = batchItems.length;
       if (docSource !== "latest") {
         const query = new URLSearchParams({ page: String(nextPage), page_size: "50", source: "email" });
@@ -318,7 +312,7 @@ function App() {
       const message = getError(error, "Could not load documents."); setDocError(message);
       if (axios.isAxiosError(error) && error.response?.status === 401) { clearSession(); notify("Your session expired. Please sign in again.", "error"); }
     } finally { setDocLoading(false); }
-  }, [token, docPage, docStatus, docType, docSource, authHeaders, clearSession, notify, recentBatchIds]);
+  }, [token, docPage, docStatus, docType, docSource, authHeaders, clearSession, notify, recentBatchIds, localFailedDocuments]);
 
   const loadAssociates = useCallback(async () => {
     if (!token || profile?.role !== "admin") return;
@@ -405,7 +399,7 @@ function App() {
       verified.forEach((result, index) => { if (result.status === "fulfilled") nextConfidence[items[index].invoice_id] = confidenceLevel(result.value.data); });
       setCommandConfidences(nextConfidence);
     } catch (error) {
-      const message = axios.isAxiosError(error) && error.response?.status === 403 ? "You do not have permission to view the Command Center." : getError(error, "Could not load the Command Center.");
+      const message = getError(error, "Could not load the Command Center.");
       setCommandError(message);
     } finally { setCommandLoading(false); }
   }, [token, authHeaders, invoiceQuery]);
@@ -576,16 +570,31 @@ function App() {
       return;
     }
     const tooLarge = chosen.filter(file => file.size > 20 * 1024 * 1024);
-    const valid = chosen.filter(file => file.size <= 20 * 1024 * 1024);
+    const sizeValid = chosen.filter(file => file.size <= 20 * 1024 * 1024);
     if (tooLarge.length) notify(`${tooLarge.map(file => file.name).join(", ")}: each file must be 20 MB or smaller.`, "error");
-    if (!valid.length) return;
+    const supportedExtensions = new Set([".pdf", ".png", ".jpg", ".jpeg", ".eml"]);
+    const valid: File[] = [];
+    const rejectedDocs: Doc[] = [];
+    const outcomes: { name: string; ok: boolean; message?: string }[] = [];
+    for (const file of sizeValid) {
+      const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+      if (supportedExtensions.has(extension)) valid.push(file);
+      else {
+        const reason = extension === ".docx" || extension === ".doc"
+          ? "Word files are not supported. Upload a PDF, PNG or JPG."
+          : "This file type is not supported. Upload a PDF, PNG, JPG or EML file.";
+        rejectedDocs.push({ id: null, local_key: `rejected-${Date.now()}-${rejectedDocs.length}`, original_filename: file.name, status: "failed", failure_message: reason });
+        outcomes.push({ name: file.name, ok: false, message: reason });
+      }
+    }
+    if (!valid.length && !rejectedDocs.length) return;
     setDocSource("latest");
     setRecentBatchIds([]);
+    setLocalFailedDocuments([]);
     try { sessionStorage.removeItem("ap-recent-upload-ids"); } catch { /* Browser storage may be disabled. */ }
-    setDocuments([]); setDocTotal(0); setDocPage(1); setSelectedDoc(null);
+    setDocuments(rejectedDocs); setDocTotal(rejectedDocs.length); setDocPage(1); setSelectedDoc(null);
     setUploading(true); setUploadProgress(0);
-    const outcomes: { name: string; ok: boolean; message?: string }[] = [];
-    const batchDocs: Doc[] = [];
+    const batchDocs: Doc[] = [...rejectedDocs];
     for (let index = 0; index < valid.length; index++) {
       const file = valid[index];
       try {
@@ -597,15 +606,23 @@ function App() {
         });
         const result = response.data;
         if (result.status === "duplicate_blocked") outcomes.push({ name: file.name, ok: false, message: "Already uploaded (duplicate)" });
-        else { batchDocs.push(result); outcomes.push({ name: result.original_filename || file.name, ok: true, message: friendlyStatus(result.status || "received") }); }
+        else if (result.status === "failed" || !isValidDocumentId(result.id)) {
+          const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+          const message = extension === ".docx" || extension === ".doc"
+            ? "Word files are not supported. Upload a PDF, PNG or JPG."
+            : "Something went wrong with this file. Please retry or upload it again.";
+          batchDocs.push({ ...result, id: null, local_key: `rejected-${Date.now()}-${index}`, original_filename: result.original_filename || file.name, status: "failed", failure_message: message });
+          outcomes.push({ name: result.original_filename || file.name, ok: false, message });
+        } else { batchDocs.push(result); outcomes.push({ name: result.original_filename || file.name, ok: true, message: friendlyStatus(result.status || "received") }); }
       } catch (error) { outcomes.push({ name: file.name, ok: false, message: getError(error, "Upload failed") }); }
-      setUploadProgress(Math.round(((index + 1) / valid.length) * 100));
+      setUploadProgress(Math.round(((index + 1) / Math.max(valid.length, 1)) * 100));
     }
     setUploading(false);
-    const batchIds = batchDocs.map(doc => doc.id);
+    const batchIds = batchDocs.map(doc => doc.id).filter(isValidDocumentId);
     setRecentBatchIds(batchIds);
     try { sessionStorage.setItem("ap-recent-upload-ids", JSON.stringify(batchIds)); } catch { /* Keep the batch in React state for this page session. */ }
     setDocuments(batchDocs); setDocTotal(batchDocs.length); setDocPage(1);
+    setLocalFailedDocuments(batchDocs.filter(doc => !isValidDocumentId(doc.id)));
     const successes = outcomes.filter(item => item.ok).length;
     setModalError("");
     setUploadResult({ outcomes, successes, total: valid.length });
@@ -621,6 +638,7 @@ function App() {
         await openInvoice(doc.linked_invoice_id, "details");
         return;
       }
+      if (!isValidDocumentId(doc.id)) return;
       const response = await axios.get<Doc>(`${CORE_URL}/api/documents/${doc.id}`, { headers: authHeaders() });
       if (response.data.linked_invoice_id) {
         setSelectedDoc(null);
@@ -691,6 +709,7 @@ function App() {
     } catch (error) { notify(getError(error, "Could not update the suggested match."), "error"); }
   }
   async function openOriginalFile(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
     const previewWindow = window.open("about:blank", "_blank");
     if (previewWindow) previewWindow.opener = null;
     try {
@@ -712,6 +731,7 @@ function App() {
     }
   }
   async function downloadOriginalFile(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
     try {
       const response = await axios.get<Blob>(`${CORE_URL}/api/documents/${doc.id}/file`, {
         params: { disposition: "attachment" }, headers: authHeaders(), responseType: "blob",
@@ -725,6 +745,7 @@ function App() {
     } catch (error) { notify(getError(error, "Could not download the original file."), "error"); }
   }
   async function retryDocument(doc: Doc) {
+    if (!isValidDocumentId(doc.id)) return;
     try {
       setDetailLoading(true);
       const endpoint = doc.status === "received" ? "parse" : "retry";
@@ -783,15 +804,7 @@ function App() {
       setCommandAction(null);
       await Promise.all([loadCommandCenter(), loadInvoices()]);
     } catch (error) {
-      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined;
-      const detailRecord = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
-      const serverMessage = typeof detail === "string" ? detail : typeof detailRecord?.message === "string" ? detailRecord.message : typeof detailRecord?.detail === "string" ? detailRecord.detail : undefined;
-      const message = axios.isAxiosError(error) && error.response?.status === 403
-        ? `You do not have permission to perform this action.${typeof serverMessage === "string" ? ` ${serverMessage}` : ""}`
-        : typeof serverMessage === "string" ? serverMessage
-          : axios.isAxiosError(error) && error.response ? `Could not ${action} this invoice. (HTTP ${error.response.status})`
-            : getError(error, `Could not ${action} this invoice.`);
-      notify(message, "error");
+      notify(getError(error, `Could not ${action} this invoice.`), "error");
     } finally { setCommandActionBusy(false); }
   }
 
@@ -847,7 +860,7 @@ function App() {
           {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts…"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
       </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "due_date", sort_dir: bucket === "overdue" ? "desc" : "asc" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
-        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><Upload {...iconProps}/> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; void uploadFiles(files); }} disabled={uploading} hidden /></label></header>
+        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><Upload {...iconProps}/> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.eml" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; void uploadFiles(files); }} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
           <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents… {uploadProgress}%</span></div>
           <div className="progress-track"><span style={{ width: `${uploadProgress}%` }}/></div>
@@ -864,13 +877,13 @@ function App() {
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
           {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads…"/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => { const actionState = documentActionAvailability(doc.id); return <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id || doc.local_key || `${doc.original_filename}-${index}`} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
               <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
               <div className="document-card-status"><span className={`pill ${statusClass(doc.status)}`}><i/>{friendlyStatus(doc.status)}</span>
-                {doc.status === "failed" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title="Retry processing" onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading}><RetryIcon/></button>}
+                {doc.status === "failed" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
               </div>
               <span className="document-card-reason" title={doc.failure_message || undefined}>{doc.failure_message || (isProcessing(doc.status) ? "Processing. Status refreshes automatically." : doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>
-            </article>)}</div>
+            </article>; })}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
           </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "Upload up to 5 bills to get started"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
         </section>
@@ -882,7 +895,7 @@ function App() {
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
       {detailLoading ? <LoadingPanel title="Opening record" subtitle="Fetching the latest information…"/> : modalError && <div className="notice error">{modalError}</div>}
-      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions"><button className="secondary" onClick={() => void openOriginalFile(selectedDoc)}><ExternalLink {...iconProps}/> View original</button><button className="secondary" onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading}><RotateCcw {...iconProps}/> Retry processing</button>}</div></div>}
+      {selectedDoc && !detailLoading && <div className="modal-body"><div className="detail-summary"><span className={`pill ${statusClass(selectedDoc.status)}`}><i/>{friendlyStatus(selectedDoc.status)}</span><span className="pill neutral">{humanize(selectedDoc.doc_type)}</span></div>{isProcessing(selectedDoc.status) ? <div className="notice info" role="status">Document is still processing. This view updates automatically.</div> : selectedDoc.failure_message && <div className="notice error">{selectedDoc.failure_message}</div>}<div className="field-grid"><DetailField label="Uploaded" value={dateLabel(selectedDoc.created_at)}/><DetailField label="Last updated" value={dateLabel(selectedDoc.updated_at)}/><DetailField label="Email sender" value={selectedDoc.email_sender}/><DetailField label="Email subject" value={selectedDoc.email_subject}/><DetailField label="Email received" value={selectedDoc.email_received_at ? dateTimeLabel(selectedDoc.email_received_at) : undefined}/></div><DocumentExtractedDetails doc={selectedDoc}/><div className="modal-actions">{(() => { const actionState = documentActionAvailability(selectedDoc.id); return <><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void openOriginalFile(selectedDoc)}><ExternalLink {...iconProps}/> View original</button><button className="secondary" title={actionState.title} disabled={actionState.disabled} onClick={() => void downloadOriginalFile(selectedDoc)}><Download {...iconProps}/> Download</button>{selectedDoc.status.toLowerCase() === "failed" && <button className="primary" title={actionState.title} onClick={() => void retryDocument(selectedDoc)} disabled={detailLoading || actionState.disabled}><RotateCcw {...iconProps}/> Retry processing</button>}</>; })()}</div></div>}
     </section></div>}
     {filePreview && <div className="modal-backdrop file-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) { URL.revokeObjectURL(filePreview.url); setFilePreview(null); } }}><section className="modal file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title"><header className="modal-head"><h2 id="file-preview-title">{filePreview.filename}</h2><button className="modal-close" aria-label="Close file preview" onClick={() => { URL.revokeObjectURL(filePreview.url); setFilePreview(null); }}><X {...iconProps}/></button></header><iframe title={`Preview of ${filePreview.filename}`} src={filePreview.url}/></section></div>}
     {selectedInvoice && (

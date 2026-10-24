@@ -6,6 +6,8 @@ import { Badge, Button, Card, Skeleton } from "./components/ui";
 import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceLevel, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
+import { LogsPage } from "./components/LogsPage";
+import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
 import "./styles/globals.css";
 import "./styles/modern.css";
 
@@ -46,6 +48,8 @@ type Doc = {
 type PageResponse<T> = { items?: T[]; total?: number; page?: number; page_size?: number; limit?: number; offset?: number };
 type InvoiceItem = { invoice_id: string; source_document_id?: string | null; received_at?: string | null; source?: "upload" | "email" | null; email_sender?: string | null; email_subject?: string | null; invoice_no?: string | null; vendor_name?: string | null; invoice_date?: string | null; due_date?: string | null; total_amount?: number | string | null; currency?: string | null; status: "processing" | "needs_review" | "ready_to_pay" | "on_hold" | "rejected"; workflow_status?: string; final_status?: string | null; owner_user_id?: string | null; gl_code?: string | null; confidence?: number | null };
 type InvoiceDetail = InvoiceItem & { vendor_id?: string | null; vendor_tax_id?: string | null; subtotal?: number | string | null; tax_amount?: number | string | null; po_number_raw?: string | null; payment_terms?: unknown; line_items?: { description?: string | null; item_code?: string | null; qty?: number | string | null; unit_price?: number | string | null; amount?: number | string | null }[]; discrepancies?: { field: string; invoice_value?: unknown; po_value?: unknown; gr_value?: unknown; severity: string; resolved?: boolean; reason?: string | null }[] };
+type NoMatchDraft = { id: string; status: string; kind: string };
+type EmailDraftDetail = NoMatchDraft & { subject: string; body: string; to_addresses: string[]; cc_addresses?: string[] };
 type EmailMessageItem = { id: string; sender?: string | null; subject?: string | null; status: string; filter_reason?: string | null; failure_reason?: string | null; received_at?: string | null; retryable: boolean; document_id?: string | null; linked_invoice_id?: string | null; linked_invoice_status?: string | null };
 type EmailStatus = { enabled: boolean; last_run_at?: string | null; next_poll_at?: string | null; docling_models_available: boolean; counts?: { processed?: number; failed?: number; needs_attention?: number; skipped_by_reason?: Record<string, number> }; last_result?: Record<string, number | Record<string, number> | string> };
 type MatchCandidate = { match_id: string; po_id: string; po_number: string; vendor_name?: string | null; total_amount?: number | string | null; currency?: string | null; score: number; status: string };
@@ -111,7 +115,7 @@ function emailPollCount(status: EmailStatus | null, key: string, fallback: strin
   return typeof value === "number" ? value : 0;
 }
 function App() {
-  const [activePage, setActivePage] = useState<"dashboard" | "command-center" | "documents" | "invoices" | "email" | "associates">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "command-center" | "documents" | "invoices" | "email" | "associates" | "logs">(() => new URLSearchParams(window.location.search).get("page") === "logs" ? "logs" : "dashboard");
   const { filters: invoiceQuery, update: updateInvoiceQuery } = useInvoiceQueryState();
   const invoiceSource = (invoiceQuery.source || "all") as "all" | "upload" | "email";
   const [globalSearch, setGlobalSearch] = useState(invoiceQuery.search || "");
@@ -148,7 +152,21 @@ function App() {
   const [invoiceError, setInvoiceError] = useState("");
   const [invoiceTotal, setInvoiceTotal] = useState(0);
   const setInvoiceSource = (source: "all" | "upload" | "email") => updateInvoiceQuery({ source });
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (activePage === "logs") params.set("page", "logs"); else params.delete("page");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  }, [activePage]);
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
+  const [noMatchDraft, setNoMatchDraft] = useState<NoMatchDraft | null>(null);
+  const [emailDraftEditor, setEmailDraftEditor] = useState<EmailDraftDetail | null>(null);
+  const [emailDraftSubject, setEmailDraftSubject] = useState("");
+  const [emailDraftBody, setEmailDraftBody] = useState("");
+  const [emailDraftRecipient, setEmailDraftRecipient] = useState("");
+  const [emailDraftOpened, setEmailDraftOpened] = useState(false);
+  const [emailDraftBusy, setEmailDraftBusy] = useState(false);
+  const [emailDraftError, setEmailDraftError] = useState("");
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
   const [decision, setDecision] = useState<{ invoiceId: string; action: "hold" | "reject" | "approve-exception"; reason: string } | null>(null);
   const [recentBatchIds, setRecentBatchIds] = useState<string[]>(() => {
@@ -300,6 +318,7 @@ function App() {
         if (invoiceQuery.gl_code) query.set("gl_code", invoiceQuery.gl_code);
         if (invoiceQuery.owner_user_id) query.set("owner_user_id", invoiceQuery.owner_user_id);
         if (invoiceQuery.sort_by) query.set("sort_by", invoiceQuery.sort_by);
+        query.set("sort_dir", invoiceQuery.sort_dir);
         if (globalSearch.trim()) query.set("search", globalSearch.trim());
         return query;
       };
@@ -334,6 +353,7 @@ function App() {
       const query = new URLSearchParams({ bucket, page: String(invoiceQuery.page), page_size: "25" });
       const sortBy = bucket === "overdue" && invoiceQuery.sort_by === "date_received" ? "days_overdue" : invoiceQuery.sort_by;
       query.set("sort_by", sortBy);
+      query.set("sort_dir", invoiceQuery.sort_dir);
       if (invoiceQuery.status) query.set("workflow_status", invoiceQuery.status);
       if (invoiceQuery.vendor_id) query.set("vendor_id", invoiceQuery.vendor_id);
       if (invoiceQuery.due_date_from) query.set("due_date_from", invoiceQuery.due_date_from);
@@ -412,7 +432,7 @@ function App() {
     }, 15000);
     return () => window.clearInterval(timer);
   }, [token, profileLoading, mustChangePassword, documents, invoices, emailMessages, docPage, loadDocuments, loadInvoices, loadEmailInbox]);
-  useEffect(() => { if (activePage === "associates") void loadAssociates(); }, [activePage, loadAssociates]);
+  useEffect(() => { if (activePage === "associates" || activePage === "logs") void loadAssociates(); }, [activePage, loadAssociates]);
   useEffect(() => { if ((activePage === "invoices" || activePage === "dashboard") && token && !profileLoading && !mustChangePassword) void loadInvoices(); }, [activePage, token, profileLoading, mustChangePassword, loadInvoices]);
   useEffect(() => { if (activePage === "command-center" && token && !profileLoading && !mustChangePassword) void loadCommandCenter(); }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
   useEffect(() => {
@@ -556,13 +576,46 @@ function App() {
     finally { setDetailLoading(false); }
   }
   async function openInvoice(invoiceId: string) {
+    setNoMatchDraft(null); setEmailDraftEditor(null); setEmailDraftOpened(false); setEmailDraftError("");
     try {
       const [detail, candidates] = await Promise.all([
         axios.get<InvoiceDetail>(`${CORE_URL}/api/invoices/${invoiceId}`, { headers: authHeaders() }),
         axios.get<{ candidates: MatchCandidate[] }>(`${CORE_URL}/api/invoices/${invoiceId}/match-candidates`, { headers: authHeaders() }),
       ]);
       setSelectedInvoice(detail.data); setMatchCandidates(candidates.data.candidates || []);
+      if (detail.data.status === "rejected") {
+        try {
+          const drafts = await axios.get<{ items?: NoMatchDraft[] }>(`${CORE_URL}/api/email-drafts`, { params: { invoice: invoiceId, kind: "no_match", status: "draft", page: 1, page_size: 10 }, headers: authHeaders() });
+          setNoMatchDraft((drafts.data.items || []).find(item => item.kind === "no_match" && item.status === "draft") || null);
+        } catch { setNoMatchDraft(null); }
+      }
     } catch (error) { notify(getError(error, "Could not load invoice details."), "error"); }
+  }
+  async function reviewNoMatchDraft() {
+    if (!noMatchDraft) return;
+    setEmailDraftError(""); setEmailDraftBusy(true);
+    try {
+      const response = await axios.get<EmailDraftDetail>(`${CORE_URL}/api/email-drafts/${noMatchDraft.id}`, { headers: authHeaders() });
+      setEmailDraftEditor(response.data); setEmailDraftSubject(response.data.subject || ""); setEmailDraftBody(response.data.body || "");
+      setEmailDraftRecipient((response.data.to_addresses || []).join(", ")); setEmailDraftOpened(true);
+    } catch (error) { setEmailDraftError(getError(error, "Could not open the email draft.")); }
+    finally { setEmailDraftBusy(false); }
+  }
+  async function sendNoMatchDraft() {
+    if (!emailDraftEditor || !emailDraftOpened) return;
+    setEmailDraftBusy(true); setEmailDraftError("");
+    try {
+      await axios.patch(`${CORE_URL}/api/email-drafts/${emailDraftEditor.id}`, {
+        subject: emailDraftSubject, body: emailDraftBody,
+        to_addresses: emailDraftRecipient.split(",").map(value => value.trim()).filter(Boolean),
+        cc_addresses: emailDraftEditor.cc_addresses || [],
+      }, { headers: authHeaders() });
+      const response = await axios.post<{ sent?: boolean; message?: string }>(`${CORE_URL}/api/email-drafts/${emailDraftEditor.id}/send`, { reason: "No match notification reviewed by associate" }, { headers: authHeaders() });
+      if (!response.data.sent) { setEmailDraftError(response.data.message || "The email was not sent."); return; }
+      notify("Email sent.", "success"); setEmailDraftEditor(null); setNoMatchDraft(null); setSelectedInvoice(null);
+      await Promise.all([loadInvoices(), loadCommandCenter()]);
+    } catch (error) { setEmailDraftError(getError(error, "Could not send the email.")); }
+    finally { setEmailDraftBusy(false); }
   }
   async function submitInvoiceDecision(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!decision) return;
@@ -688,6 +741,7 @@ function App() {
       <p className="side-label">WORKSPACE</p>
       <nav className="primary-nav" aria-label="Main navigation">
         <button className={activePage === "dashboard" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("dashboard"); setMobileNavOpen(false); }}><span className="nav-icon">▦</span><span>Dashboard</span></button>
+        {canSeeAdminNavigation(profile?.role) && <button className={activePage === "logs" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("logs"); setMobileNavOpen(false); }}><span className="nav-icon">≡</span><span>Logs</span></button>}
         <button className={activePage === "command-center" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("command-center"); setMobileNavOpen(false); if (activePage !== "command-center") updateInvoiceQuery({ status: "" }); }}><span className="nav-icon">▤</span><span>Command Center</span></button>
         <button className={activePage === "documents" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("documents"); setMobileNavOpen(false); }}><span className="nav-icon">▤</span><span>Documents</span><b>{docTotal}</b></button>
         <button className={activePage === "invoices" ? "nav-item nav-active" : "nav-item"} onClick={() => { setActivePage("invoices"); setMobileNavOpen(false); if (activePage !== "invoices" && invoiceQuery.status && !invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) updateInvoiceQuery({ status: "" }); }}><span className="nav-icon">＄</span><span>Invoices</span><b>{Object.values(invoiceCounts).reduce((sum, count) => sum + count, 0)}</b></button>
@@ -696,9 +750,9 @@ function App() {
       </nav>
       <div className="sidebar-bottom"><div className="profile"><span className="avatar">{(email[0] || "U").toUpperCase()}</span><div><b>{profile?.name || email || "Workspace user"}</b><small>{email}</small></div></div><button className="signout" onClick={() => void logout()} disabled={authBusy}>↪ <span>Sign out</span></button></div>
     </aside>
-    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}>☰</button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && <label className="topbar-search"><span aria-hidden="true">⌕</span><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><span aria-hidden="true">⌄</span></button></header>
+    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}>☰</button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><span aria-hidden="true">⌕</span><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><span aria-hidden="true">⌄</span></button></header>
       <div className="content">
-      {activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
+      {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={Object.fromEntries(associates.map(user => [user.id, user.name]))} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "associates" && profile?.role === "admin" ? <>
         <section className="panel admin-associate-panel">
           <div className="panel-head"><div><span className="eyebrow purple">ADMINISTRATION</span><h2>Add an associate</h2><p className="muted">Temporary password is valid for 24 hours. The associate must change it at first sign in.</p></div></div>
           <form className="toolbar" onSubmit={createAssociate}>
@@ -714,7 +768,7 @@ function App() {
           {associatesError && <div className="notice error">{associatesError}<button onClick={() => void loadAssociates()}>Try again</button></div>}
           {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts…"/> : associates.filter(item => item.is_active).length ? <div className="table-wrap"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
-      </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "date_received" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
+      </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "due_date", sort_dir: bucket === "overdue" ? "desc" : "asc" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
         <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={uploadFiles} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
           <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents… {uploadProgress}%</span></div>
@@ -759,12 +813,15 @@ function App() {
         <InvoiceReviewDrawer
           invoice={selectedInvoice}
           candidates={matchCandidates}
+          noMatchDraft={noMatchDraft}
+          onReviewNoMatchDraft={() => void reviewNoMatchDraft()}
           onClose={() => setSelectedInvoice(null)}
           onMatch={(candidate, accept) => { void confirmSuggestedMatch(candidate, accept); }}
           onDecision={action => { setDecision({ invoiceId: selectedInvoice.invoice_id, action, reason: "" }); }}
         />
       </div>
     )}
+    {emailDraftEditor && emailDraftOpened && <div className="modal-backdrop email-draft-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !emailDraftBusy) setEmailDraftEditor(null); }}><section className="modal email-draft-modal" role="dialog" aria-modal="true" aria-labelledby="email-draft-title"><header className="modal-head"><div><span className="eyebrow">NO MATCH EMAIL</span><h2 id="email-draft-title">Review email draft</h2></div><button className="modal-close" aria-label="Close email draft" disabled={emailDraftBusy} onClick={() => setEmailDraftEditor(null)}>?</button></header><div className="modal-body"><label className="form-label">Recipient<input type="text" value={emailDraftRecipient} onChange={event => setEmailDraftRecipient(event.target.value)} required aria-label="Email recipient"/></label><label className="form-label">Subject<input value={emailDraftSubject} onChange={event => setEmailDraftSubject(event.target.value)} required/></label><label className="form-label">Body<textarea value={emailDraftBody} onChange={event => setEmailDraftBody(event.target.value)} required rows={10}/></label>{emailDraftError && <div className="notice error" role="alert">{emailDraftError}</div>}<div className="modal-actions"><Button variant="secondary" onClick={() => setEmailDraftEditor(null)} disabled={emailDraftBusy}>Close</Button><Button variant="primary" onClick={() => void sendNoMatchDraft()} disabled={!emailDraftOpened || emailDraftBusy || !emailDraftRecipient.trim() || !emailDraftSubject.trim() || !emailDraftBody.trim()}>{emailDraftBusy ? "Sending?" : "Send"}</Button></div></div></section></div>}
     {commandAction && <div className="modal-backdrop command-action-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !commandActionBusy) setCommandAction(null); }}><form className="modal command-action-modal" role="dialog" aria-modal="true" aria-labelledby="command-action-title" onSubmit={event => { event.preventDefault(); void submitCommandAction(); }}><header className="modal-head"><div><span className="eyebrow">INVOICE ACTION</span><h2 id="command-action-title">{humanize(commandAction.action)} invoice</h2></div><button className="modal-close" type="button" onClick={() => setCommandAction(null)} disabled={commandActionBusy} aria-label="Cancel">×</button></header><div className="modal-body"><p>Confirm {humanize(commandAction.action).toLowerCase()} for <strong>{commandAction.bill.vendor_name || "Unknown vendor"}</strong> · <strong>{formatInvoiceMoney(commandAction.bill.total_amount, commandAction.bill.currency)}</strong>?</p>{commandAction.action === "pay" && <><label className="form-label">Payment date<input type="date" value={commandPaidDate} onChange={event => setCommandPaidDate(event.target.value)} required/></label><label className="form-label">Payment method<select value={commandPaymentMethod} onChange={event => setCommandPaymentMethod(event.target.value)}><option value="bank_transfer">Bank transfer</option><option value="cheque">Cheque</option><option value="upi">UPI</option><option value="cash">Cash</option><option value="other">Other</option></select></label><label className="form-label">Payment reference<input value={commandPaymentReference} onChange={event => setCommandPaymentReference(event.target.value)} required maxLength={200}/></label></>}{["reject", "hold", "escalate", "reassign"].includes(commandAction.action) && <label className="form-label">Reason<textarea value={commandActionReason} onChange={event => setCommandActionReason(event.target.value)} required minLength={3} maxLength={1000} rows={4} placeholder="Enter a reason"/></label>}{commandAction.action === "reassign" && <label className="form-label">Assign to<select value={commandOwnerId} onChange={event => setCommandOwnerId(event.target.value)} required><option value="">Choose an associate</option>{filterOwners.map(owner => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>}<div className="modal-actions"><Button type="button" variant="secondary" onClick={() => setCommandAction(null)} disabled={commandActionBusy}>Cancel</Button><Button type="submit" variant={commandAction.action === "reject" ? "danger" : "primary"} disabled={commandActionBusy}>{commandActionBusy ? "Saving…" : `Confirm ${humanize(commandAction.action).toLowerCase()}`}</Button></div></div></form></div>}{decision && <div className="modal-backdrop reason-backdrop" role="presentation"><form className="modal reason-modal" onSubmit={submitInvoiceDecision}><header className="modal-head"><div><span className="eyebrow purple">REVIEW DECISION</span><h2>{decision.action === "hold" ? "Place invoice on hold" : decision.action === "reject" ? "Reject invoice" : "Approve with exception"}</h2></div><button className="modal-close" type="button" onClick={() => setDecision(null)} aria-label="Cancel">×</button></header><div className="modal-body"><label className="form-label">Reason<textarea value={decision.reason} onChange={event => setDecision({ ...decision, reason: event.target.value })} required minLength={3} maxLength={1000} rows={4} placeholder="Explain this decision" /></label><div className="modal-actions"><button className="secondary" type="button" onClick={() => setDecision(null)}>Cancel</button><button className="primary" type="submit">Save decision</button></div></div></form></div>}
     {uploadResult && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setUploadResult(null); }}><section className="modal results-modal" role="dialog" aria-modal="true" aria-labelledby="upload-result-title"><header className="modal-head"><div><span className="eyebrow purple">UPLOAD SUMMARY</span><h2 id="upload-result-title">{uploadResult.successes} of {uploadResult.total} files uploaded</h2><p className="muted">Each result below comes from the upload request.</p></div><button className="modal-close" onClick={() => setUploadResult(null)} aria-label="Close upload summary">×</button></header><div className="modal-body"><div className="outcome-list">{uploadResult.outcomes.map((outcome, index) => <div className="outcome-row" key={`${outcome.name}-${index}`}><span className={`outcome-icon ${outcome.ok ? "ok" : "bad"}`}>{outcome.ok ? "✓" : "!"}</span><div><b>{outcome.name}</b><small>{outcome.message}</small></div></div>)}</div><div className="modal-actions"><button className="secondary" onClick={() => setUploadResult(null)}>Close</button><button className="primary" onClick={() => setUploadResult(null)}>View documents</button></div></div></section></div>}
   </div>;
@@ -998,12 +1055,13 @@ function InvoiceComparisonRow({ item, currency }: { item: NonNullable<InvoiceDet
   const cls = item.resolved ? "matched" : item.severity === "error" ? "mismatch" : "within-tolerance";
   return <tr className={`comparison-row comparison-row-${cls}`}><td>{humanize(item.field)}</td><td>{render(item.invoice_value)}</td><td>{render(item.po_value)}</td><td>{render(item.gr_value)}</td><td><span className={`comparison-result ${cls}`}>{result}</span></td></tr>;
 }
-function InvoiceReviewDrawer({ invoice, candidates, onClose, onMatch, onDecision }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void }) {
+function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatchDraft, onClose, onMatch, onDecision }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void }) {
   const rows = [...(invoice.discrepancies || [])].sort((a, b) => Number(Boolean(a.resolved)) - Number(Boolean(b.resolved)) || (a.severity === "error" ? -1 : 1));
   const issues = rows.filter(item => !item.resolved);
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];
   const hasNoReceipt = issues.some(item => item.field.includes("accepted_quantity") || item.field.includes("goods_receipt"));
   return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice">×</button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></div>
+    {noMatchDraft && <div className="notice info no-match-draft-banner"><strong>Draft ready to review</strong><p>A no-match email is ready. Review and edit it before sending.</p><Button variant="secondary" onClick={onReviewNoMatchDraft}>Review email draft</Button></div>}
     {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}
     <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{labels.map(([label, keys]) => { const value = keys.map(key => invoice[key]).find(item => item != null && item !== ""); if (value == null || (typeof value !== "string" && typeof value !== "number")) return null; const shown = ["invoice_date", "due_date"].includes(String(keys[0])) ? dateLabel(String(value)) : String(value); return <DetailField key={label} label={label} value={shown}/>; })}</div></section>
     <section className="extracted-section"><h3 className="section-title">Amounts</h3><div className="field-grid"><DetailField label="Subtotal" value={invoice.subtotal == null ? undefined : formatInvoiceMoney(invoice.subtotal, invoice.currency)}/><DetailField label="Tax" value={invoice.tax_amount == null ? undefined : formatInvoiceMoney(invoice.tax_amount, invoice.currency)}/><DetailField label="Total" value={invoice.total_amount == null ? undefined : formatInvoiceMoney(invoice.total_amount, invoice.currency)}/></div></section>

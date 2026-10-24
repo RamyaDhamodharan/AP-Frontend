@@ -75,7 +75,7 @@ export function Sidebar({
     </div>
     <p className="side-label">WORKSPACE</p>
     <nav className="primary-nav" aria-label="Main navigation">
-      {items.map(item => <button type="button" key={item.id} className={`nav-item${activePage === item.id ? " nav-active" : ""}`} aria-label={`${item.label}${"count" in item && item.count ? `, ${item.count}` : ""}`} aria-current={activePage === item.id ? "page" : undefined} title={collapsed ? item.label : undefined} onClick={() => { onNavigate(item.id); onMobileClose(); }}>
+      {items.map(item => <button type="button" key={item.id} className={`nav-item${activePage === item.id ? " nav-active" : ""}`} aria-label={`${item.label}${"count" in item && item.count ? `, ${item.count}` : ""}`} aria-current={activePage === item.id ? "page" : undefined} title={collapsed ? item.label : undefined} onClick={() => { onNavigate(item.id as WorkspacePage); onMobileClose(); }}>
         <span className="nav-icon">{item.icon}</span><span className="nav-label">{item.label}</span>
         {"count" in item && item.count !== undefined && item.count > 0 && <b className="nav-count">{collapsed ? <span className="nav-count-dot" aria-label={`${item.count} items`}/> : item.count}</b>}
       </button>)}

@@ -1,3 +1,4 @@
+import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "./ui";
 import { defaultSortLabel, toggleSortDirection, type SortDirection } from "../sortControls";
@@ -144,7 +145,7 @@ export function InvoiceFilters({
       <label className="form-label">GL code<input value={filters.gl_code} onChange={event => onChange({ gl_code: event.target.value })} placeholder="Any GL code"/></label>
       <label className="form-label">Owner<select value={filters.owner_user_id} onChange={event => onChange({ owner_user_id: event.target.value })}><option value="">All owners</option>{owners.map(owner => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>
     </div>
-    <div className="invoice-filter-footer"><span className="filter-result-count" aria-live="polite">{resultCount.toLocaleString("en-IN")} results</span>{active.length > 0 && <div className="filter-chips" aria-label="Active filters">{active.map(filter => <button key={filter.key} type="button" className="filter-chip" onClick={() => onChange({ [filter.key]: "" })} aria-label={`Remove ${filter.label} filter`}>{filter.label}<span aria-hidden="true">×</span></button>)}<Button variant="ghost" onClick={() => onChange({ status: "", vendor_id: "", due_date_from: "", due_date_to: "", amount_min: "", amount_max: "", gl_code: "", owner_user_id: "" })}>Clear all</Button></div>}</div>
+    <div className="invoice-filter-footer"><span className="filter-result-count" aria-live="polite">{resultCount.toLocaleString("en-IN")} results</span>{active.length > 0 && <div className="filter-chips" aria-label="Active filters">{active.map(filter => <button key={filter.key} type="button" className="filter-chip" onClick={() => onChange({ [filter.key]: "" })} aria-label={`Remove ${filter.label} filter`}>{filter.label}<X size={18} strokeWidth={1.75} aria-hidden="true"/></button>)}<Button variant="ghost" onClick={() => onChange({ status: "", vendor_id: "", due_date_from: "", due_date_to: "", amount_min: "", amount_max: "", gl_code: "", owner_user_id: "" })}>Clear all</Button></div>}</div>
   </section>;
 }
 
@@ -154,5 +155,5 @@ const sorts = [
 
 export function SortControl({ value, sortDir = "asc", onChange, onSortDirChange }: { value: string; sortDir?: "asc" | "desc"; onChange: (value: string) => void; onSortDirChange?: (value: "asc" | "desc") => void }) {
   const label = sorts.find(([key]) => key === value)?.[1] || "Due date";
-  return <div className="sort-control"><label>Sort by<select aria-label="Sort invoices by" value={value} onChange={event => onChange(event.target.value)}>{sorts.map(([key, optionLabel]) => <option key={key} value={key}>{optionLabel}</option>)}</select></label><button type="button" className="sort-direction-toggle" aria-label={defaultSortLabel(label, sortDir)} aria-pressed={sortDir === "desc"} onClick={() => onSortDirChange?.(toggleSortDirection(sortDir))}>{sortDir === "asc" ? "Ascending ↑" : "Descending ↓"}</button></div>;
+  return <div className="sort-control"><label>Sort by<select aria-label="Sort invoices by" value={value} onChange={event => onChange(event.target.value)}>{sorts.map(([key, optionLabel]) => <option key={key} value={key}>{optionLabel}</option>)}</select></label><button type="button" className="sort-direction-toggle" aria-label={defaultSortLabel(label, sortDir)} aria-pressed={sortDir === "desc"} onClick={() => onSortDirChange?.(toggleSortDirection(sortDir))}>{sortDir === "asc" ? <>Ascending <ArrowUp size={18} strokeWidth={1.75}/></> : <>Descending <ArrowDown size={18} strokeWidth={1.75}/></>}</button></div>;
 }

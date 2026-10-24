@@ -291,7 +291,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* Modal, drawer, toast and detail surfaces */
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgb(36 58 94 / 40%); }
-.modal { width: min(100%, 760px); max-height: min(88vh, 900px); overflow: auto; border: 1px solid var(--border); border-radius: 0; background: #fff; }
+.modal { width: min(100%, 760px); max-height: min(88vh, 900px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: #fff; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 24px; border-bottom: var(--line); }
 .modal-head h2 { margin: 4px 0 0; }
 .modal-head p { margin: 8px 0 0; }
@@ -344,7 +344,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .hero-points span:first-child { color: var(--orange); }
 .hero-orbit { display: none; }
 .auth-side { display: grid; place-items: center; padding: 32px; background: var(--warm-white); }
-.auth-card { width: min(100%, 440px); padding: 32px; border: var(--line); border-radius: 0; background: #fff; }
+.auth-card { width: min(100%, 440px); padding: 32px; border: var(--line); border-radius: var(--radius-md); background: #fff; }
 .auth-card h2 { margin: 8px 0; }
 .auth-card > .muted { margin-bottom: 24px; }
 .auth-card .full { width: 100%; margin-top: 8px; }
@@ -445,7 +445,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .invoice-filters { padding: 16px 24px; border-top: var(--line); border-bottom: var(--line); background: var(--surface); }
 .invoice-filter-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 0 12px; }
 .invoice-filter-grid .form-label { min-width: 0; margin: 8px 0; }
-.invoice-filter-grid input, .invoice-filter-grid select, .invoice-workspace-tools select, .sort-control select { display: block; width: 100%; min-height: 40px; margin-top: 8px; padding: 8px 10px; border: var(--line); border-radius: 0; background: var(--warm-white); color: var(--navy); font: 400 14px/20px "Lato", system-ui, sans-serif; }
+.invoice-filter-grid input, .invoice-filter-grid select, .invoice-workspace-tools select, .sort-control select { display: block; width: 100%; min-height: 40px; margin-top: 8px; padding: 8px 10px; border: var(--line); border-radius: var(--radius-sm); background: var(--warm-white); color: var(--navy); font: 400 14px/20px "Lato", system-ui, sans-serif; }
 .invoice-filter-grid input:focus, .invoice-filter-grid select:focus, .invoice-workspace-tools select:focus, .sort-control select:focus { outline: 2px solid var(--navy); outline-offset: 1px; border-color: var(--orange); }
 .invoice-filter-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .filter-result-count { color: var(--text-secondary); font: 600 12px/16px "Poppins", system-ui, sans-serif; }
@@ -541,6 +541,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .logs-table td small { display: block; max-width: 130px; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .logs-sort { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .logs-sort:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+
+/* Consistent shape tokens for interactive controls and overlays. */
+button, input, select, textarea { border-radius: var(--radius-sm); }
+.modal, .drawer-backdrop .invoice-detail-modal { border-radius: var(--radius-md); }
+.topbar .primary, .topbar .ui-button-primary { border-radius: var(--radius-sm); }
 .logs-loading { display: grid; gap: 8px; padding: 16px; }
 .logs-loading > div { display: grid; grid-template-columns: repeat(7, minmax(80px, 1fr)); gap: 12px; }
 .logs-detail-panel { width: min(100%, 760px); max-height: 90vh; overflow-y: auto; }

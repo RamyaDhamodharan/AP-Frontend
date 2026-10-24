@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { Badge, Button, Card, EmptyState, Skeleton } from "./ui";
+import { InvoiceTimeline } from "./InvoiceTimeline";
 import type { FilterOwner, FilterVendor } from "./InvoiceFilters";
 
 const PAGE_SIZE = 25;
@@ -14,7 +15,6 @@ type AuditEntry = {
   duration_ms?: number | null; new_value?: Record<string, unknown> | null;
   output_summary?: Record<string, unknown> | null;
 };
-type TimelineEntry = AuditEntry & { kind?: string };
 type Props = {
   coreUrl: string;
   authHeaders: () => { Authorization: string };
@@ -96,9 +96,7 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<AuditEntry | null>(null);
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
-  const [timelineLoading, setTimelineLoading] = useState(false);
-  const [timelineError, setTimelineError] = useState("");
+  const [showTimeline, setShowTimeline] = useState(false);
 
   const update = useCallback((patch: Partial<LogQuery>) => {
     const next = { ...queryFromUrl(), ...patch };
@@ -163,15 +161,8 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
   }, [owners, userNames]);
 
   async function openEntry(entry: AuditEntry) {
-    setSelected(entry); setTimeline([]); setTimelineError("");
-    const invoiceId = rowInvoiceId(entry);
-    if (!invoiceId) return;
-    setTimelineLoading(true);
-    try {
-      const response = await axios.get<TimelineEntry[]>(`${coreUrl}/api/invoices/${invoiceId}/timeline`, { headers: authHeaders() });
-      setTimeline(response.data || []);
-    } catch (timelineLoadError) { setTimelineError(errorText(timelineLoadError)); }
-    finally { setTimelineLoading(false); }
+    setSelected(entry);
+    setShowTimeline(false);
   }
 
   return <div className="logs-page page-enter">
@@ -203,7 +194,7 @@ export function LogsPage({ coreUrl, authHeaders, vendors, owners, userNames, onO
       {!loading && total > 0 && <div className="pagination"><span>Page {query.page} of {totalPages} · {total.toLocaleString("en-IN")} records</span><div><Button variant="secondary" disabled={Number(query.page) <= 1} onClick={() => update({ page: String(Number(query.page) - 1) })}>Previous</Button><Button variant="secondary" disabled={Number(query.page) >= totalPages} onClick={() => update({ page: String(Number(query.page) + 1) })}>Next</Button></div></div>}
     </Card>
     {selected && <div className="modal-backdrop logs-detail-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelected(null); }}><section className="modal logs-detail-panel" role="dialog" aria-modal="true" aria-labelledby="log-detail-title"><header className="modal-head"><div><span className="eyebrow">ACTIVITY DETAIL</span><h2 id="log-detail-title">{friendly(selected.action)}</h2></div><button className="modal-close" aria-label="Close log details" onClick={() => setSelected(null)}>×</button></header><div className="modal-body"><dl className="logs-detail-grid"><dt>Date / time</dt><dd>{stamp(selected.created_at)}</dd><dt>User</dt><dd>{selected.created_by ? userNames[selected.created_by] || `User ${selected.created_by.slice(0, 8)}` : "System"}</dd><dt>Entity</dt><dd>{friendly(selected.entity_type === "email_draft" ? "email draft" : selected.entity_type === "invoice_issue" ? "issue" : selected.entity_type)} · {selected.entity_id || "—"}</dd><dt>Result</dt><dd>{friendly(selected.result)}</dd><dt>Reason / notes</dt><dd>{reasonFor(selected)}</dd><dt>Output summary</dt><dd>{outputFor(selected.output_summary)}</dd></dl>
-        {selectedInvoiceId && <><div className="logs-timeline-heading"><h3>Invoice timeline</h3><Button variant="secondary" onClick={() => onOpenInvoice(selectedInvoiceId)}>Open invoice</Button></div>{timelineError && <div className="notice error" role="alert">{timelineError}</div>}{timelineLoading ? <div className="logs-timeline-loading"><Skeleton/><Skeleton/><Skeleton/></div> : timeline.length ? <ol className="logs-timeline">{timeline.map(item => <li key={item.id}><span className={`logs-timeline-dot ${item.result || "success"}`} aria-hidden="true"/><div><strong>{friendly(item.kind === "state_change" ? item.new_value?.workflow_status as string : item.step_name || item.action)}</strong><time>{stamp(item.created_at)}</time><p>{item.kind === "state_change" && typeof item.new_value?.reason === "string" ? item.new_value.reason : "Activity recorded"}</p>{item.step_name && <small>{friendly(item.step_name)}{item.duration_ms != null ? ` · ${item.duration_ms} ms` : ""} · {outputFor(item.output_summary)}</small>}</div></li>)}</ol> : <p className="muted">No invoice timeline entries are available.</p>}</>}
+        {selectedInvoiceId && <><div className="logs-timeline-heading"><h3>Invoice timeline</h3><div><Button variant="secondary" onClick={() => onOpenInvoice(selectedInvoiceId)}>Open invoice</Button> <Button variant="secondary" aria-expanded={showTimeline} onClick={() => setShowTimeline(value => !value)}>{showTimeline ? "Hide timeline" : "Show timeline"}</Button></div></div>{showTimeline && <InvoiceTimeline invoiceId={selectedInvoiceId} coreUrl={coreUrl} authHeaders={authHeaders}/>}</>}
       </div></section></div>}
   </div>;
 }

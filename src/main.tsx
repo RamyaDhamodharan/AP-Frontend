@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { createAuthSession } from "./authSession";
-import { Badge, Button, Card, Skeleton } from "./components/ui";
+import { Badge, Button, Card, Skeleton, Tabs } from "./components/ui";
 import { CommandCenter, confidenceLevel, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceLevel, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { LogsPage } from "./components/LogsPage";
+import { InvoiceTimeline } from "./components/InvoiceTimeline";
 import { canAccessLogs, canSeeAdminNavigation } from "./accessControls";
 import "./styles/globals.css";
 import "./styles/modern.css";
@@ -812,6 +813,7 @@ function App() {
       <div className="modal-backdrop drawer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedInvoice(null); }}>
         <InvoiceReviewDrawer
           invoice={selectedInvoice}
+          authHeaders={authHeaders}
           candidates={matchCandidates}
           noMatchDraft={noMatchDraft}
           onReviewNoMatchDraft={() => void reviewNoMatchDraft()}
@@ -1055,12 +1057,15 @@ function InvoiceComparisonRow({ item, currency }: { item: NonNullable<InvoiceDet
   const cls = item.resolved ? "matched" : item.severity === "error" ? "mismatch" : "within-tolerance";
   return <tr className={`comparison-row comparison-row-${cls}`}><td>{humanize(item.field)}</td><td>{render(item.invoice_value)}</td><td>{render(item.po_value)}</td><td>{render(item.gr_value)}</td><td><span className={`comparison-result ${cls}`}>{result}</span></td></tr>;
 }
-function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatchDraft, onClose, onMatch, onDecision }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void }) {
+function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatchDraft, onClose, onMatch, onDecision, authHeaders }: { invoice: InvoiceDetail; candidates: MatchCandidate[]; noMatchDraft: NoMatchDraft | null; onReviewNoMatchDraft: () => void; onClose: () => void; onMatch: (candidate: MatchCandidate, accept: boolean) => void; onDecision: (action: "hold" | "reject" | "approve-exception") => void; authHeaders: () => { Authorization: string } }) {
+  const [activeTab, setActiveTab] = useState<"details" | "timeline">("details");
   const rows = [...(invoice.discrepancies || [])].sort((a, b) => Number(Boolean(a.resolved)) - Number(Boolean(b.resolved)) || (a.severity === "error" ? -1 : 1));
   const issues = rows.filter(item => !item.resolved);
   const labels: [string, (keyof InvoiceDetail)[]][] = [["Vendor", ["vendor_name"]], ["Vendor Tax ID", ["vendor_tax_id"]], ["Invoice Number", ["invoice_no"]], ["Invoice Date", ["invoice_date"]], ["Due Date", ["due_date"]], ["PO/Order Number", ["po_number_raw"]], ["Payment Terms", ["payment_terms"]], ["Currency", ["currency"]]];
   const hasNoReceipt = issues.some(item => item.field.includes("accepted_quantity") || item.field.includes("goods_receipt"));
   return <section className="modal invoice-detail-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-detail-title"><header className="modal-head"><div><span className="eyebrow purple">INVOICE REVIEW</span><h2 id="invoice-detail-title">{invoice.invoice_no || "Invoice details"}</h2></div><button className="modal-close" onClick={onClose} aria-label="Close invoice">×</button></header><div className="modal-body"><div className="detail-summary"><span className={`invoice-status ${invoiceStatusClass(invoice.status)}`}>{invoiceStatusLabels[invoice.status]}</span><span className="pill neutral">{invoice.vendor_name || "Vendor"}</span><Badge tone={invoice.source === "email" ? "amber" : "neutral"}>{invoice.source === "email" ? "Email" : "Upload"}</Badge></div>
+    <Tabs label="Invoice details" tabs={[{ id: "details", label: "Details" }, { id: "timeline", label: "Timeline" }]} value={activeTab} onChange={setActiveTab}/>
+    {activeTab === "timeline" ? <InvoiceTimeline invoiceId={invoice.invoice_id} sourceDocumentId={invoice.source_document_id} coreUrl={CORE_URL} authHeaders={authHeaders}/> : <>
     {noMatchDraft && <div className="notice info no-match-draft-banner"><strong>Draft ready to review</strong><p>A no-match email is ready. Review and edit it before sending.</p><Button variant="secondary" onClick={onReviewNoMatchDraft}>Review email draft</Button></div>}
     {invoice.source === "email" && <section className="extracted-section"><h3 className="section-title">Email source</h3><div className="field-grid"><DetailField label="Sender" value={invoice.email_sender}/><DetailField label="Subject" value={invoice.email_subject}/><DetailField label="Received" value={invoice.received_at ? dateTimeLabel(invoice.received_at) : undefined}/></div></section>}
     <section className="extracted-section"><h3 className="section-title">Invoice</h3><div className="field-grid">{labels.map(([label, keys]) => { const value = keys.map(key => invoice[key]).find(item => item != null && item !== ""); if (value == null || (typeof value !== "string" && typeof value !== "number")) return null; const shown = ["invoice_date", "due_date"].includes(String(keys[0])) ? dateLabel(String(value)) : String(value); return <DetailField key={label} label={label} value={shown}/>; })}</div></section>
@@ -1071,6 +1076,7 @@ function InvoiceReviewDrawer({ invoice, candidates, noMatchDraft, onReviewNoMatc
     {invoice.status === "needs_review" && !invoice.po_number_raw && !candidates.length && <p className="muted">No match found for this invoice.</p>}
     {hasNoReceipt && invoice.status === "needs_review" && <div className="notice info">No goods receipt was found. You can hold this invoice while waiting for the receipt, approve with an exception, or reject it.</div>}
     <div className="modal-actions"><button className="secondary" onClick={() => onDecision("hold")} disabled={invoice.status === "rejected"}>Hold</button><button className="danger-button" onClick={() => onDecision("reject")} disabled={invoice.status === "rejected"}>Reject</button>{invoice.status === "needs_review" && <button className="primary" onClick={() => onDecision("approve-exception")}>Approve with exception</button>}</div>
+    </>}
   </div></section>;
 }
 

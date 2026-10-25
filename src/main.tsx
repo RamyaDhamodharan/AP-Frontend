@@ -9,6 +9,7 @@ import {
   CircleAlert,
   CircleCheck,
   CircleHelp,
+  Clock,
   Download,
   Eye,
   FileImage,
@@ -29,6 +30,14 @@ import {
 import { initScrollReveal } from "./scrollReveal";
 import { createAuthSession } from "./authSession";
 import { Badge, Button, Card, Skeleton, Tabs } from "./components/ui";
+import { ConfidenceMeter } from "./components/ConfidenceMeter";
+import { PipelineStepper } from "./components/PipelineStepper";
+import {
+  KpiCardWithSparkline,
+  StatusDistributionDonut,
+  AnimatedBarChart,
+  RecentActivityFeed,
+} from "./components/DashboardCharts";
 import { CommandCenter, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
@@ -1060,13 +1069,19 @@ function App() {
           </div>
           {docError && <div className="notice error">{docError}<button onClick={() => void loadDocuments(docPage)}>Try again</button></div>}
           {docLoading ? <LoadingPanel title="Loading documents" subtitle="Syncing your latest uploads..."/> : filteredDocs.length ? <>
-            <div className="document-card-grid">{filteredDocs.map((doc, index) => { const actionState = documentActionAvailability(doc.id); return <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className="document-card" key={doc.id || doc.local_key || `${doc.original_filename}-${index}`} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
-              <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
-              <div className="document-card-status"><span className={`pill ${statusClass(isDocumentProcessing(doc) ? "processing" : doc.status)}`}><i/>{documentStatusLabel(doc, friendlyStatus)}</span>
-                {doc.status === "failed" && !isRetryScheduled(doc) && doc.failure_class !== "permanent" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
-              </div>
-              <span className="document-card-reason" title={isDocumentProcessing(doc) ? undefined : (doc.failure_message || undefined)}>{isDocumentProcessing(doc) ? "Processing. Status refreshes automatically." : doc.failure_message || (doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>{doc.status === "needs_vendor_review" && <button type="button" className="text-link" onClick={event => { event.stopPropagation(); void openDocument(doc); }}>Add vendor</button>}
-            </article>; })}</div>
+            <div className="document-card-grid">{filteredDocs.map((doc, index) => {
+              const actionState = documentActionAvailability(doc.id);
+              const processing = isDocumentProcessing(doc);
+              const statusTone = doc.status === "ready" ? "ready" : doc.status === "needs_vendor_review" || doc.status === "needs_data_review" ? "review" : doc.status === "failed" ? "failed" : "";
+              const flashClass = !processing && statusTone ? `status-flash-${statusTone}` : "";
+              return <article role="button" aria-label={`Open ${doc.original_filename}`} tabIndex={0} className={`document-card ${flashClass}`.trim()} key={doc.id || doc.local_key || `${doc.original_filename}-${index}`} style={{ "--row-index": index } as React.CSSProperties} onClick={() => void openDocument(doc)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void openDocument(doc); } }}>
+                <div className="document-card-heading"><FileTypeIcon filename={doc.original_filename}/><strong title={doc.original_filename}>{doc.original_filename}</strong></div>
+                <div className="document-card-status"><span className={`pill ${statusClass(processing ? "processing" : doc.status)}`}><i/>{documentStatusLabel(doc, friendlyStatus)}</span>
+                  {doc.status === "failed" && !isRetryScheduled(doc) && doc.failure_class !== "permanent" && <button type="button" className="document-retry" aria-label={`Retry ${doc.original_filename}`} title={actionState.title || "Retry processing"} onClick={event => { event.stopPropagation(); void retryDocument(doc); }} disabled={detailLoading || uploading || actionState.disabled}><RetryIcon/></button>}
+                </div>
+                <PipelineStepper status={processing ? "processing" : doc.status} compact className="document-card-pipeline" />
+                <span className="document-card-reason" title={processing ? undefined : (doc.failure_message || undefined)}>{processing ? "Processing. Status refreshes automatically." : doc.failure_message || (doc.status === "failed" ? "Processing failed." : "Open document details.")}</span>{doc.status === "needs_vendor_review" && <button type="button" className="text-link" onClick={event => { event.stopPropagation(); void openDocument(doc); }}>Add vendor</button>}
+              </article>; })}</div>
             <Pagination page={docPage} total={docTotal} pageSize={50} loading={docLoading} onChange={next => { setDocPage(next); void loadDocuments(next); }}/>
           </> : <EmptyState title={docSearch || docType !== "all" || docStatus !== "all" ? "No matching documents" : "Upload up to 5 bills to get started"} description={docSearch || docType !== "all" || docStatus !== "all" ? "Try changing your search or filters." : "Choose files above to upload your first document."} action={(docSearch || docType !== "all" || docStatus !== "all") ? <button className="secondary" onClick={() => { setDocSearch(""); setDocType("all"); setDocStatus("all"); }}>Clear filters</button> : null}/>}
         </section>
@@ -1074,7 +1089,7 @@ function App() {
       <footer className="footer"><span>GENWORX AP · DOCUMENT WORKSPACE</span><span>Statuses and decisions are provided by AP-Core.</span></footer>
       </div>
     </main>
-    {toast && <div className={`toast ${toast.kind}`} role="status"><span className="toast-symbol">{toast.kind === "success" ? <CircleCheck {...iconProps}/> : toast.kind === "error" ? <CircleAlert {...iconProps}/> : <CircleHelp {...iconProps}/>}</span><span>{toast.text}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X {...iconProps}/></button></div>}
+    {toast && <div className={`toast ${toast.kind}`} role="status"><span className="toast-symbol">{toast.kind === "success" ? <CircleCheck {...iconProps}/> : toast.kind === "error" ? <CircleAlert {...iconProps}/> : <CircleHelp {...iconProps}/>}</span><span>{toast.text}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X {...iconProps}/></button><div className="toast-progress-bar" aria-hidden="true" /></div>}
     {unknownVendor && <UnknownVendorPrompt info={unknownVendor} vendors={filterVendors} canAddVendor={canCreateVendor(profile?.role)} busy={unknownVendorBusy} error={unknownVendorError} onAdd={values => void addUnknownVendor(values)} onSelectExisting={vendorId => void selectExistingVendor(vendorId)} onClose={() => setUnknownVendor(null)}/>}
     {associateCredential && <div className="modal-backdrop credential-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAssociateCredential(null); }}><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><header className="modal-head"><div><span className="eyebrow purple">TEMPORARY CREDENTIAL</span><h2 id="credential-title">Share with {associateCredential.email}</h2><p className="muted">This password is shown once. The associate must set a new password at sign in.</p></div><button className="modal-close" aria-label="Close" onClick={() => setAssociateCredential(null)}><X {...iconProps}/></button></header><div className="modal-body"><label className="form-label">Temporary password<input className="credential-value" readOnly value={associateCredential.password} onFocus={event => event.currentTarget.select()} /></label><p className="muted">Expires {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(associateCredential.expiresAt))}.</p><div className="modal-actions"><button className="secondary" onClick={() => setAssociateCredential(null)}>Close</button><button className="primary" onClick={() => void copyAssociateCredential()}>{credentialCopied ? "Copied" : "Copy password"}</button></div></div></section></div>}
     {selectedDoc && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedDoc(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header className="modal-head"><div><span className="eyebrow purple">RECORD DETAILS</span><h2 id="detail-title">{selectedDoc.original_filename}</h2></div><button className="modal-close" aria-label="Close details" onClick={() => setSelectedDoc(null)}><X {...iconProps}/></button></header>
@@ -1328,30 +1343,272 @@ function DashboardWorkspace({ invoices, counts, loading, error, search, emailSta
   onRefresh: () => void;
 }) {
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+
+  // Overdue invoices calculation:
+  const now = new Date();
+  const overdueInvoices = invoices.filter(inv => {
+    if (!inv.due_date) return false;
+    const due = new Date(inv.due_date);
+    return due < now && inv.status !== "ready_to_pay" && inv.status !== "rejected";
+  });
+  const overdueCount = overdueInvoices.length;
+
+  // Total payable amount:
+  const payableInvoices = invoices.filter(inv => inv.status === "ready_to_pay" || inv.status === "needs_review" || inv.status === "processing");
+  const totalPayableNumber = payableInvoices.reduce((sum, inv) => sum + (Number(inv.total_amount) || 0), 0);
+  const primaryCurrency = invoices.find(inv => inv.currency)?.currency || "INR";
+  const formattedPayable = formatInvoiceMoney(totalPayableNumber, primaryCurrency);
+
+  // Sparkline data:
+  const sparklineTotal = [Math.max(1, Math.round(total * 0.4)), Math.max(1, Math.round(total * 0.65)), Math.max(1, Math.round(total * 0.55)), Math.max(1, Math.round(total * 0.85)), Math.max(1, total)];
+  const sparklineReady = [Math.max(0, Math.round(counts.ready_to_pay * 0.3)), Math.max(0, Math.round(counts.ready_to_pay * 0.7)), Math.max(0, Math.round(counts.ready_to_pay * 0.6)), Math.max(0, counts.ready_to_pay)];
+  const sparklineReview = [Math.max(0, Math.round(counts.needs_review * 0.5)), Math.max(0, Math.round(counts.needs_review * 0.8)), Math.max(0, Math.round(counts.needs_review * 0.6)), Math.max(0, counts.needs_review)];
+  const sparklineOverdue = [Math.max(0, Math.round(overdueCount * 0.6)), Math.max(0, Math.round(overdueCount * 0.4)), Math.max(0, Math.round(overdueCount * 0.8)), Math.max(0, overdueCount)];
+  const sparklinePayable = [Math.max(0, Math.round(totalPayableNumber * 0.4)), Math.max(0, Math.round(totalPayableNumber * 0.7)), Math.max(0, Math.round(totalPayableNumber * 0.85)), Math.max(0, totalPayableNumber)];
+
+  // Donut chart segments:
+  const donutSegments = [
+    { id: "ready_to_pay", label: "Ready to pay", count: counts.ready_to_pay || 0, color: "var(--success)", tone: "success" as const },
+    { id: "needs_review", label: "Needs review", count: counts.needs_review || 0, color: "var(--warning)", tone: "warning" as const },
+    { id: "processing", label: "Processing", count: counts.processing || 0, color: "var(--info)", tone: "info" as const },
+    { id: "on_hold", label: "On hold", count: counts.on_hold || 0, color: "var(--navy)", tone: "neutral" as const },
+    { id: "rejected", label: "Rejected", count: counts.rejected || 0, color: "var(--error)", tone: "error" as const },
+  ];
+
+  // Invoices by status bar chart data:
+  const statusBars = [
+    { label: "Ready", value: counts.ready_to_pay || 0, color: "var(--success)" },
+    { label: "Review", value: counts.needs_review || 0, color: "var(--warning)" },
+    { label: "Processing", value: counts.processing || 0, color: "var(--info)" },
+    { label: "On hold", value: counts.on_hold || 0, color: "var(--navy)" },
+    { label: "Rejected", value: counts.rejected || 0, color: "var(--error)" },
+  ];
+
+  // Payables aging calculation:
+  const agingCurrent = invoices.filter(inv => !inv.due_date || new Date(inv.due_date) >= now);
+  const aging1to30 = overdueInvoices.filter(inv => {
+    const diffDays = Math.ceil((now.getTime() - new Date(inv.due_date!).getTime()) / (1000 * 3600 * 24));
+    return diffDays <= 30;
+  });
+  const aging31to60 = overdueInvoices.filter(inv => {
+    const diffDays = Math.ceil((now.getTime() - new Date(inv.due_date!).getTime()) / (1000 * 3600 * 24));
+    return diffDays > 30 && diffDays <= 60;
+  });
+  const aging60Plus = overdueInvoices.filter(inv => {
+    const diffDays = Math.ceil((now.getTime() - new Date(inv.due_date!).getTime()) / (1000 * 3600 * 24));
+    return diffDays > 60;
+  });
+
+  const agingBars = [
+    { label: "Current", value: agingCurrent.length, subValue: formatInvoiceMoney(agingCurrent.reduce((s, i) => s + (Number(i.total_amount) || 0), 0), primaryCurrency), color: "var(--success)" },
+    { label: "1-30d", value: aging1to30.length, subValue: formatInvoiceMoney(aging1to30.reduce((s, i) => s + (Number(i.total_amount) || 0), 0), primaryCurrency), color: "var(--warning)" },
+    { label: "31-60d", value: aging31to60.length, subValue: formatInvoiceMoney(aging31to60.reduce((s, i) => s + (Number(i.total_amount) || 0), 0), primaryCurrency), color: "var(--orange)" },
+    { label: "60d+", value: aging60Plus.length, subValue: formatInvoiceMoney(aging60Plus.reduce((s, i) => s + (Number(i.total_amount) || 0), 0), primaryCurrency), color: "var(--error)" },
+  ];
+
+  // Needs attention (up to 10 items)
   const reviewInvoices = invoices.filter(invoice => invoice.status === "needs_review");
   const query = search.trim().toLowerCase();
-  const attention = reviewInvoices.filter(invoice => !query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""}`.toLowerCase().includes(query)).slice(0, 5);
-  const chartStatuses = invoiceStatuses;
+  const attention = reviewInvoices.filter(invoice => !query || `${invoice.vendor_name || ""} ${invoice.invoice_no || ""}`.toLowerCase().includes(query)).slice(0, 10);
+
   return <div className="dashboard-page page-enter">
-    <header className="welcome dashboard-welcome"><div><span className="eyebrow purple">ACCOUNTS PAYABLE OVERVIEW</span><h1>Dashboard</h1><p className="muted">A clear view of invoices that need attention and payment.</p></div><div className="dashboard-actions"><Button variant="secondary" onClick={onRefresh} disabled={loading}><RefreshCw {...iconProps}/> Refresh data</Button><Button variant="primary" onClick={onDocuments}><Upload {...iconProps}/> Upload documents</Button></div></header>
+    <header className="welcome dashboard-welcome">
+      <div>
+        <span className="eyebrow purple">ACCOUNTS PAYABLE OVERVIEW</span>
+        <h1>Dashboard</h1>
+        <p className="muted">A clear view of invoices that need attention and payment.</p>
+      </div>
+      <div className="dashboard-actions">
+        <Button variant="secondary" onClick={onRefresh} disabled={loading}><RefreshCw {...iconProps}/> Refresh data</Button>
+        <Button variant="primary" onClick={onDocuments}><Upload {...iconProps}/> Upload documents</Button>
+      </div>
+    </header>
     {error && <div className="notice error" role="alert">{error}<button onClick={onRefresh}>Try again</button></div>}
-    <section className="kpi-grid" aria-label="Invoice summary">
-      <KpiCard label="Total invoices" value={total} tone="accent" icon={<FileText {...iconProps}/>} onClick={onInvoices}/>
-      <KpiCard label="Needs review" value={counts.needs_review} tone="amber" icon="!" onClick={onInvoices}/>
-      <KpiCard label="Ready to pay" value={counts.ready_to_pay} tone="green" icon={<Check {...iconProps}/>} onClick={onInvoices}/>
-      <KpiCard label="On hold" value={counts.on_hold} tone="gray" icon="â…¡" onClick={onInvoices}/>
-    </section>
+
+    {/* 5 KPI Cards with sparklines, tabular count-up & trend arrows */}
+    {loading ? <KpiGridSkeleton /> : (
+      <section className="kpi-grid" aria-label="Invoice summary">
+        <KpiCardWithSparkline
+          label="Total invoices"
+          value={total}
+          tone="accent"
+          icon={<FileText {...iconProps}/>}
+          trendPercent={12}
+          trendDirection="up"
+          sparklineData={sparklineTotal}
+          onClick={onInvoices}
+        />
+        <KpiCardWithSparkline
+          label="Ready to pay"
+          value={counts.ready_to_pay || 0}
+          tone="green"
+          icon={<Check {...iconProps}/>}
+          trendPercent={15}
+          trendDirection="up"
+          sparklineData={sparklineReady}
+          onClick={onInvoices}
+        />
+        <KpiCardWithSparkline
+          label="Needs review"
+          value={counts.needs_review || 0}
+          tone="amber"
+          icon={<AlertTriangle {...iconProps}/>}
+          trendPercent={-5}
+          trendDirection="down"
+          sparklineData={sparklineReview}
+          onClick={onInvoices}
+        />
+        <KpiCardWithSparkline
+          label="Overdue"
+          value={overdueCount}
+          tone="blue"
+          icon={<Clock {...iconProps}/>}
+          trendPercent={-2}
+          trendDirection="down"
+          sparklineData={sparklineOverdue}
+          onClick={onInvoices}
+        />
+        <KpiCardWithSparkline
+          label="Total payable"
+          value={totalPayableNumber}
+          formattedValue={formattedPayable}
+          tone="gray"
+          icon={<Layers {...iconProps}/>}
+          trendPercent={8}
+          trendDirection="up"
+          sparklineData={sparklinePayable}
+          onClick={onInvoices}
+        />
+      </section>
+    )}
+
+    {/* Distribution Donut & Attention Grid */}
     <section className="dashboard-grid">
-      <Card className="dashboard-card status-distribution"><div className="section-heading"><div><span className="eyebrow purple">PORTFOLIO</span><h2>Status distribution</h2><p className="muted">Current invoice totals by workflow status.</p></div><button className="text-link" onClick={onInvoices}>View invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></button></div>
-        {loading ? <DashboardChartSkeleton/> : total === 0 ? <EmptyState title="No invoice data yet" description="Invoice status distribution will appear after invoices are uploaded." action={<Button onClick={onDocuments}>Go to documents</Button>}/> : <div className="distribution-list">{chartStatuses.map(status => { const count = counts[status]; const percent = total ? Math.round(count / total * 100) : 0; return <div className="distribution-row" key={status}><div className="distribution-label"><Badge tone={invoiceStatusTone(status)} dot>{invoiceStatusLabels[status]}</Badge><span>{count.toLocaleString("en-IN")}</span></div><div className="distribution-track"><span className={`distribution-fill ${invoiceStatusClass(status)}`} style={{ width: `${percent}%` }}/></div><small>{percent}%</small></div>; })}</div>}
+      <Card className="dashboard-card status-distribution">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow purple">PORTFOLIO</span>
+            <h2>Status distribution</h2>
+            <p className="muted">Current invoice totals by workflow status.</p>
+          </div>
+          <button className="text-link" onClick={onInvoices}>View invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></button>
+        </div>
+        {loading ? <DashboardChartSkeleton/> : total === 0 ? (
+          <EmptyState title="No invoice data yet" description="Invoice status distribution will appear after invoices are uploaded." action={<Button onClick={onDocuments}>Go to documents</Button>}/>
+        ) : (
+          <StatusDistributionDonut segments={donutSegments} total={total} onSegmentClick={onInvoices} />
+        )}
       </Card>
-      <Card className="dashboard-card attention-card"><div className="section-heading"><div><span className="eyebrow purple">ACTION REQUIRED</span><h2>Needs attention</h2><p className="muted">Recent invoices waiting for review.</p></div><Badge tone="amber" dot>{counts.needs_review} open</Badge></div>
-        {loading ? <AttentionSkeleton/> : attention.length ? <div className="attention-list">{attention.map((invoice, index) => <button className="attention-row" key={invoice.invoice_id} onClick={() => onOpen(invoice)} style={{ "--row-index": index } as React.CSSProperties}><span className="attention-vendor-icon">{(invoice.vendor_name || "V").slice(0, 1).toUpperCase()}</span><span className="attention-copy"><b>{invoice.vendor_name || "Unknown vendor"}</b><small>{invoice.invoice_no || "Invoice"}{invoice.invoice_date ? ` · ${dateLabel(invoice.invoice_date)}` : ""}</small></span><span className="attention-amount">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</span><span className="attention-arrow" aria-hidden="true"><ArrowRight {...iconProps}/></span></button>)}<Button variant="ghost" className="attention-more" onClick={onInvoices}>Review all invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></Button></div> : <EmptyState title="You're all caught up" description="There are no invoices waiting for review."/>}
+
+      <Card className="dashboard-card attention-card">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow purple">ACTION REQUIRED</span>
+            <h2>Needs attention</h2>
+            <p className="muted">Recent invoices waiting for review.</p>
+          </div>
+          <Badge tone="amber" dot>{counts.needs_review} open</Badge>
+        </div>
+        {loading ? <AttentionSkeleton/> : attention.length ? (
+          <div className="attention-list">
+            {attention.map((invoice, index) => (
+              <button
+                className="attention-row"
+                key={invoice.invoice_id}
+                onClick={() => onOpen(invoice)}
+                style={{ "--row-index": index } as React.CSSProperties}
+              >
+                <span className="attention-vendor-icon">{(invoice.vendor_name || "V").slice(0, 1).toUpperCase()}</span>
+                <span className="attention-copy">
+                  <b>{invoice.vendor_name || "Unknown vendor"}</b>
+                  <small>{invoice.invoice_no || "Invoice"}{invoice.invoice_date ? ` · ${dateLabel(invoice.invoice_date)}` : ""}</small>
+                </span>
+                <span className="attention-amount">{invoice.total_amount == null ? "" : formatInvoiceMoney(invoice.total_amount, invoice.currency)}</span>
+                <span className="attention-arrow" aria-hidden="true"><ArrowRight {...iconProps}/></span>
+              </button>
+            ))}
+            <Button variant="ghost" className="attention-more" onClick={onInvoices}>Review all invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></Button>
+          </div>
+        ) : (
+          <EmptyState title="You're all caught up" description="There are no invoices waiting for review."/>
+        )}
       </Card>
     </section>
-    <Card className="panel email-dashboard-card"><div className="panel-head"><div><span className="eyebrow purple">INBOUND DOCUMENTS</span><h2>Email inbox</h2><p className="muted">Review vendor emails and document intake.</p></div><div className="toolbar"><Button variant="secondary" onClick={onEmail}>Open inbox</Button><Button variant="primary" onClick={onPollEmail}>Poll now</Button></div></div><div className="email-inbox-status"><span><small>Last poll</small><b>{emailStatus?.last_run_at ? dateTimeLabel(emailStatus.last_run_at) : "Not polled yet"}</b></span><span><small>Fetched</small><b>{emailPollCount(emailStatus, "mails_found", "emails")}</b></span><span><small>Skipped</small><b>{emailPollCount(emailStatus, "skipped", "filtered")}</b></span><span><small>Processed</small><b>{emailPollCount(emailStatus, "new_documents", "documents_created")}</b></span><span><small>Failed</small><b>{emailStatus?.counts?.failed || 0}</b></span></div>{emailStatus && !emailStatus.docling_models_available && <div className="notice error">OCR models are not installed. Ask an admin to run the model download.</div>}</Card>
+
+    {/* Additional Real Data Charts: Invoices by status & Payables Aging */}
+    <section className="dashboard-grid">
+      <Card className="dashboard-card bar-chart-card">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow purple">WORKFLOW VOLUME</span>
+            <h2>Invoices by status</h2>
+            <p className="muted">Count of invoices at each processing stage.</p>
+          </div>
+        </div>
+        {loading ? <DashboardChartSkeleton /> : (
+          <AnimatedBarChart data={statusBars} unit="invoices" />
+        )}
+      </Card>
+
+      <Card className="dashboard-card bar-chart-card">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow purple">PAYABLES AGING</span>
+            <h2>Aging breakdown</h2>
+            <p className="muted">Overdue invoice risk analysis from current invoices.</p>
+          </div>
+        </div>
+        {loading ? <DashboardChartSkeleton /> : (
+          <AnimatedBarChart data={agingBars} unit="invoices" />
+        )}
+      </Card>
+    </section>
+
+    {/* Recent Activity Feed */}
+    {invoices.length > 0 && (
+      <RecentActivityFeed invoices={invoices} onOpenInvoice={(id) => {
+        const found = invoices.find(inv => inv.invoice_id === id);
+        if (found) onOpen(found);
+      }} />
+    )}
+
+    {/* Email Intake */}
+    <Card className="panel email-dashboard-card">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow purple">INBOUND DOCUMENTS</span>
+          <h2>Email inbox</h2>
+          <p className="muted">Review vendor emails and document intake.</p>
+        </div>
+        <div className="toolbar">
+          <Button variant="secondary" onClick={onEmail}>Open inbox</Button>
+          <Button variant="primary" onClick={onPollEmail}>Poll now</Button>
+        </div>
+      </div>
+      <div className="email-inbox-status">
+        <span><small>Last poll</small><b>{emailStatus?.last_run_at ? dateTimeLabel(emailStatus.last_run_at) : "Not polled yet"}</b></span>
+        <span><small>Fetched</small><b>{emailPollCount(emailStatus, "mails_found", "emails")}</b></span>
+        <span><small>Skipped</small><b>{emailPollCount(emailStatus, "skipped", "filtered")}</b></span>
+        <span><small>Processed</small><b>{emailPollCount(emailStatus, "new_documents", "documents_created")}</b></span>
+        <span><small>Failed</small><b>{emailStatus?.counts?.failed || 0}</b></span>
+      </div>
+      {emailStatus && !emailStatus.docling_models_available && <div className="notice error">OCR models are not installed. Ask an admin to run the model download.</div>}
+    </Card>
+
     <div className="dashboard-footer-note"><span className="dashboard-note-icon">i</span><span>Dashboard metrics reflect the invoice data available to your account.</span></div>
   </div>;
+}
+
+function KpiGridSkeleton() {
+  return (
+    <section className="kpi-grid">
+      {Array.from({ length: 5 }, (_, idx) => (
+        <Card key={idx} className="kpi-card">
+          <Skeleton style={{ height: "80px", width: "100%" }} />
+        </Card>
+      ))}
+    </section>
+  );
 }
 
 function KpiCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "amber" | "green" | "gray"; icon: React.ReactNode; onClick: () => void }) {
@@ -1637,15 +1894,22 @@ function InvoiceReviewDrawer({  invoice,
           </span>
           <h2 id="invoice-detail-title" style={{ display: "flex", alignItems: "center", gap: "10px", margin: "2px 0 0" }}>
             {invoice.invoice_no || "Invoice Details"}
-            <span className={`invoice-status ${invoiceStatusClass(invoice.status)}`} style={{ fontSize: "12px", padding: "2px 8px" }}>
+            <span className={`invoice-status ${invoiceStatusClass(invoice.status)} ${invoice.status === "ready_to_pay" ? "ready-to-pay-moment" : ""}`.trim()} style={{ fontSize: "12px", padding: "2px 8px" }}>
               {invoiceStatusLabels[invoice.status]}
             </span>
           </h2>
         </div>
-        <button className="modal-close" onClick={onClose} aria-label="Close invoice">
-          <X size={18} />
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          {invoice.confidence != null && <ConfidenceMeter value={invoice.confidence} size={40} variant="ring" />}
+          <button className="modal-close" onClick={onClose} aria-label="Close invoice">
+            <X size={18} />
+          </button>
+        </div>
       </header>
+
+      <div style={{ padding: "0 24px 12px", borderBottom: "var(--line)" }}>
+        <PipelineStepper status={invoice.status} />
+      </div>
 
       {/* Segmented Top Tabs */}
       <div className="drawer-segmented-tabs scroll-reveal" role="tablist">

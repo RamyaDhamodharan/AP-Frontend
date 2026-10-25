@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import { Badge, Button, Card, EmptyState, Skeleton } from "./ui";
+import { ConfidenceMeter } from "./ConfidenceMeter";
 import { InvoiceFilters, SortControl, type FilterOwner, type FilterVendor, type InvoiceQueryPatch, type InvoiceQueryState } from "./InvoiceFilters";
 import type { UnknownVendorInfo } from "./UnknownVendorPrompt";
 import { VendorResolutionBanner } from "./VendorResolutionBanner";
@@ -137,7 +138,7 @@ export function CommandCenter({
                 <td>{bill.invoice_no || "—"}</td><td>{bill.due_date ? new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${bill.due_date}T00:00:00`)) : "—"}</td>
                 {bucket === "overdue" && <><td><strong>{bill.days_overdue || 0} days</strong></td><td>{bill.reason || "Past due date"}</td></>}
                 <td className="amount-cell">{money(bill.total_amount, bill.currency)}</td><td><Badge tone={(bill.status || bill.workflow_status) === "rejected" ? "error" : (bill.status || bill.workflow_status) === "needs_review" || bill.workflow_status === "overdue" ? "warning" : "success"} dot>{titleStatus(bill.status || bill.workflow_status)}</Badge></td><td>{owner}</td>
-                <td><span className={`confidence-level confidence-${tone}`} title={`Confidence ${percent}%`}><i aria-hidden="true"/>{percent}%</span></td>
+                <td><ConfidenceMeter value={percent} variant="bar" /></td>
                 <td><details className="command-row-menu"><summary aria-label={`Actions for ${bill.invoice_no || "invoice"}`}>Actions</summary><div role="menu">{allowed.map(action => { const available = action === "view" || Boolean(bill.actions?.includes(action)); return <button type="button" role="menuitem" key={action} disabled={!available} title={available ? undefined : "Not available yet"} onClick={() => action === "view" ? onOpen(bill.invoice_id) : onAction(bill, action)}>{actionLabels[action]}{!available && <span className="sr-only">Not available yet</span>}</button>; })}</div></details></td>
               </tr>;
             })}

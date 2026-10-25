@@ -1,12 +1,22 @@
 import { FileText } from "lucide-react";
-import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "ghost" | "danger";
+  loading?: boolean;
 };
 
-export function Button({ variant = "secondary", className = "", ...props }: ButtonProps) {
-  return <button className={`ui-button ui-button-${variant} ${className}`.trim()} {...props} />;
+export function Button({ variant = "secondary", loading = false, className = "", children, disabled, ...props }: ButtonProps) {
+  return (
+    <button
+      className={`ui-button ui-button-${variant} ${loading ? "ui-button-loading" : ""} ${className}`.trim()}
+      disabled={disabled || loading}
+      {...props}
+    >
+      {loading && <span className="spinner" aria-hidden="true" />}
+      {children}
+    </button>
+  );
 }
 
 export function Card({ className = "", ...props }: HTMLAttributes<HTMLElement>) {
@@ -41,11 +51,32 @@ export function Tabs<T extends string>({ label, tabs, value, onChange }: {
   value: T;
   onChange: (next: T) => void;
 }) {
-  return <div className="ui-tabs" role="tablist" aria-label={label}>
-    {tabs.map(tab => <button key={tab.id} type="button" role="tab" aria-selected={value === tab.id} className={value === tab.id ? "active" : ""} onClick={() => onChange(tab.id)}>
-      {tab.label}{tab.count !== undefined && <b>{tab.count}</b>}
-    </button>)}
-  </div>;
+  const activeIndex = Math.max(0, tabs.findIndex(tab => tab.id === value));
+  return (
+    <div
+      className="ui-tabs"
+      role="tablist"
+      aria-label={label}
+      style={{
+        "--active-tab": activeIndex,
+        "--tab-count": Math.max(1, tabs.length),
+      } as CSSProperties}
+    >
+      {tabs.map(tab => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={value === tab.id}
+          className={value === tab.id ? "active" : ""}
+          onClick={() => onChange(tab.id)}
+        >
+          {tab.label}{tab.count !== undefined && <b>{tab.count}</b>}
+        </button>
+      ))}
+      <span className="ui-tabs-indicator" aria-hidden="true" />
+    </div>
+  );
 }
 
 export function Avatar({ label, className = "" }: { label: string; className?: string }) {
@@ -57,5 +88,14 @@ export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivEle
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="empty"><div className="empty-icon" aria-hidden="true"><FileText size={18} strokeWidth={1.75}/></div><h3>{title}</h3><p>{description}</p>{action}</div>;
+  return (
+    <div className="empty">
+      <div className="empty-icon" aria-hidden="true">
+        <FileText size={18} strokeWidth={1.75} />
+      </div>
+      <h3>{title}</h3>
+      <p>{description}</p>
+      {action}
+    </div>
+  );
 }

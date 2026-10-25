@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Badge, Button, Card, EmptyState, Skeleton, Tabs, type TabOption } from "./ui";
+import { ConfidenceMeter } from "./ConfidenceMeter";
 import {
   InvoiceFilters,
   SortControl,
@@ -356,12 +357,7 @@ export function InvoicesWorkspacePage({
                         </strong>
                       </td>
                       <td>
-                        <div className="confidence-meter-mini" title={`Extraction confidence: ${conf}%`}>
-                          <div className="confidence-bar-bg">
-                            <div className={`confidence-bar-val ${confLevel}`} style={{ width: `${Math.min(100, Math.max(8, conf))}%` }} />
-                          </div>
-                          <span className="confidence-pct-txt">{conf}%</span>
-                        </div>
+                        <ConfidenceMeter value={conf} variant="bar" />
                       </td>
                       <td>
                         {invoice.active_discrepancy_count != null && invoice.active_discrepancy_count > 0 ? (

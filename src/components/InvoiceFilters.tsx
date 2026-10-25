@@ -85,7 +85,7 @@ export function useInvoiceQueryState() {
 
 export type FilterVendor = { id: string; name: string };
 export type FilterOwner = { id: string; name: string; email?: string };
-type FilterMode = "invoices" | "command-center";
+type FilterMode = "invoices";
 
 const invoiceStatuses = [
   ["processing", "In progress"], ["needs_review", "Needs review"], ["ready_to_pay", "Ready to pay"], ["on_hold", "On hold"], ["rejected", "Rejected"],

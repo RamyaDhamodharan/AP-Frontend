@@ -14,7 +14,9 @@ export function uploadLimitMessage(fileCount: number): string | null {
 }
 
 export function isSupportedUploadFilename(filename: string): boolean {
-  const extension = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  const dotIndex = filename.lastIndexOf(".");
+  if (dotIndex === -1) return false;
+  const extension = filename.slice(dotIndex).toLowerCase();
   return SUPPORTED_UPLOAD_EXTENSIONS.has(extension);
 }
 

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  Gauge,
   LayoutDashboard,
   LogOut,
   Mail,
@@ -15,7 +14,7 @@ import {
   Building2,
 } from "lucide-react";
 
-export type WorkspacePage = "dashboard" | "command-center" | "documents" | "invoices" | "purchase-orders" | "goods-receipts" | "vendors" | "email" | "associates" | "logs";
+export type WorkspacePage = "dashboard" | "documents" | "invoices" | "purchase-orders" | "goods-receipts" | "vendors" | "email" | "associates" | "logs";
 
 type Props = {
   activePage: WorkspacePage;
@@ -63,7 +62,6 @@ export function Sidebar({
   const items = [
     { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard {...iconProps}/> },
     ...(isAdmin ? [{ id: "logs", label: "Logs", icon: <ScrollText {...iconProps}/> }] : []),
-    { id: "command-center", label: "Command Center", icon: <Gauge {...iconProps}/> },
     { id: "documents", label: "Documents", icon: <FileText {...iconProps}/>, count: documentCount },
     { id: "invoices", label: "Invoices", icon: <Receipt {...iconProps}/>, count: invoiceCount },
     { id: "purchase-orders", label: "Purchase Orders", icon: <ClipboardList {...iconProps}/> },

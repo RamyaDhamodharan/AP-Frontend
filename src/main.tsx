@@ -14,6 +14,7 @@ import {
   FileImage,
   FileText,
   CheckCircle2,
+  Clock,
   AlertTriangle,
   ListChecks,
   Layers,
@@ -29,7 +30,6 @@ import {
 import { initScrollReveal } from "./scrollReveal";
 import { createAuthSession } from "./authSession";
 import { Badge, Button, Card, Skeleton, Tabs } from "./components/ui";
-import { CommandCenter, type CommandBill, type CommandBucket, type CommandSummary, type ConfidenceResponse } from "./components/CommandCenter";
 import { useInvoiceQueryState, type FilterOwner, type FilterVendor } from "./components/InvoiceFilters";
 import { InvoicesWorkspacePage } from "./components/InvoicesWorkspacePage";
 import { ProcurementWorkspacePage } from "./components/ProcurementWorkspacePage";
@@ -75,14 +75,16 @@ const authSession = createAuthSession(async () => {
   return response.data.access_token || null;
 });
 axios.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  if (config.url?.startsWith(CORE_URL) && authSession.getAccessToken()) {
-    config.headers.set("Authorization", `Bearer ${authSession.getAccessToken()}`);
+  const token = authSession.getAccessToken();
+  if (token && (config.url?.startsWith(CORE_URL) || (config.url?.startsWith(AUTH_URL) && !config.url?.includes("/api/auth/login") && !config.url?.includes("/api/auth/refresh")))) {
+    config.headers.set("Authorization", `Bearer ${token}`);
   }
   return config;
 });
 axios.interceptors.response.use(undefined, async (error: AxiosError) => {
   const config = error.config;
-  if (error.response?.status !== 401 || !config || config.authRetried || !config.url?.startsWith(CORE_URL)) throw error;
+  const isAuthEndpoint = Boolean(config?.url?.includes("/api/auth/refresh") || config?.url?.includes("/api/auth/login"));
+  if (error.response?.status !== 401 || !config || config.authRetried || isAuthEndpoint) throw error;
   config.authRetried = true;
   const token = await authSession.refresh();
   if (!token) throw error;
@@ -271,21 +273,8 @@ function App() {
   const [emailLoading, setEmailLoading] = useState(false);
   const [emailBusy, setEmailBusy] = useState(false);
   const [emailError, setEmailError] = useState("");
-  const [commandSummary, setCommandSummary] = useState<Partial<Record<CommandBucket, CommandSummary>>>({});
-  const [commandBills, setCommandBills] = useState<CommandBill[]>([]);
-  const [commandTotal, setCommandTotal] = useState(0);
-  const [commandLoading, setCommandLoading] = useState(false);
-  const [commandError, setCommandError] = useState("");
-  const [commandConfidences, setCommandConfidences] = useState<Record<string, number>>({});
   const [filterVendors, setFilterVendors] = useState<FilterVendor[]>([]);
   const [filterOwners, setFilterOwners] = useState<FilterOwner[]>([]);
-  const [commandAction, setCommandAction] = useState<{ bill: CommandBill; action: string } | null>(null);
-  const [commandActionReason, setCommandActionReason] = useState("");
-  const [commandOwnerId, setCommandOwnerId] = useState("");
-  const [commandPaidDate, setCommandPaidDate] = useState(new Date().toISOString().slice(0, 10));
-  const [commandPaymentMethod, setCommandPaymentMethod] = useState("bank_transfer");
-  const [commandPaymentReference, setCommandPaymentReference] = useState("");
-  const [commandActionBusy, setCommandActionBusy] = useState(false);
   const notifiedEmailInvoiceIds = useRef<Set<string> | null>(null);
 
   const notify = useCallback((text: string, kind: "success" | "error" | "info" = "info") => {
@@ -435,41 +424,6 @@ function App() {
     finally { setInvoiceLoading(false); }
   }, [token, authHeaders, invoiceSource, invoiceQuery, globalSearch, notify]);
 
-  const loadCommandCenter = useCallback(async () => {
-    if (!token) return;
-    setCommandLoading(true); setCommandError("");
-    try {
-      const bucket = (invoiceQuery.bucket || "ready_to_pay") as CommandBucket;
-      const query = new URLSearchParams({ bucket, page: String(invoiceQuery.page), page_size: "25" });
-      const sortBy = bucket === "overdue" && invoiceQuery.sort_by === "date_received" ? "days_overdue" : invoiceQuery.sort_by;
-      query.set("sort_by", sortBy);
-      query.set("sort_dir", invoiceQuery.sort_dir);
-      if (invoiceQuery.status) query.set("workflow_status", invoiceQuery.status);
-      if (invoiceQuery.vendor_id) query.set("vendor_id", invoiceQuery.vendor_id);
-      if (invoiceQuery.due_date_from) query.set("due_date_from", invoiceQuery.due_date_from);
-      if (invoiceQuery.due_date_to) query.set("due_date_to", invoiceQuery.due_date_to);
-      if (invoiceQuery.amount_min) query.set("amount_min", invoiceQuery.amount_min);
-      if (invoiceQuery.amount_max) query.set("amount_max", invoiceQuery.amount_max);
-      if (invoiceQuery.gl_code) query.set("gl_code", invoiceQuery.gl_code);
-      if (invoiceQuery.owner_user_id) query.set("owner_user_id", invoiceQuery.owner_user_id);
-      const [summaryResponse, listResponse] = await Promise.all([
-        axios.get<{ buckets: Record<string, CommandSummary> }>(`${CORE_URL}/api/command-center/summary`, { headers: authHeaders() }),
-        axios.get<{ items: CommandBill[]; total: number; page: number; page_size: number }>(`${CORE_URL}/api/command-center/bills?${query}`, { headers: authHeaders() }),
-      ]);
-      const allBuckets = summaryResponse.data.buckets || {};
-      setCommandSummary({ ready_to_pay: allBuckets.ready_to_pay, needs_review: allBuckets.needs_review, overdue: allBuckets.overdue, rejected: allBuckets.rejected });
-      const items = listResponse.data.items || [];
-      setCommandBills(items);
-      setCommandTotal(listResponse.data.total || 0);
-      const verified = await Promise.allSettled(items.map(bill => axios.get<ConfidenceResponse>(`${CORE_URL}/api/invoices/${bill.invoice_id}/verification`, { headers: authHeaders() })));
-      const nextConfidence: Record<string, number> = {};
-      verified.forEach((result, index) => { if (result.status === "fulfilled") nextConfidence[items[index].invoice_id] = Number((result.value.data as ConfidenceResponse & { overall_confidence_percent?: number }).overall_confidence_percent ?? 0); });
-      setCommandConfidences(nextConfidence);
-    } catch (error) {
-      const message = getError(error, "Could not load the Command Center.");
-      setCommandError(message);
-    } finally { setCommandLoading(false); }
-  }, [token, authHeaders, invoiceQuery]);
 
   const vendorSearchTimer = useRef<number | undefined>(undefined);
   const searchFilterVendors = useCallback((search: string) => {
@@ -523,12 +477,6 @@ function App() {
   }, [token, profileLoading, mustChangePassword, documents, invoices, emailMessages, docPage, loadDocuments, loadInvoices, loadEmailInbox]);
   useEffect(() => { if (activePage === "associates" || activePage === "logs") void loadAssociates(); }, [activePage, loadAssociates]);
   useEffect(() => { if ((activePage === "invoices" || activePage === "dashboard") && token && !profileLoading && !mustChangePassword) void loadInvoices(); }, [activePage, token, profileLoading, mustChangePassword, loadInvoices]);
-  useEffect(() => { if (activePage === "command-center" && token && !profileLoading && !mustChangePassword) void loadCommandCenter(); }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
-  useEffect(() => {
-    if (activePage !== "command-center" || !token || profileLoading || mustChangePassword) return;
-    const timer = window.setInterval(() => { void loadCommandCenter(); }, 30_000);
-    return () => window.clearInterval(timer);
-  }, [activePage, token, profileLoading, mustChangePassword, loadCommandCenter]);
   useEffect(() => { if (token && !profileLoading && !mustChangePassword && ["email", "dashboard"].includes(activePage)) void loadEmailInbox(); }, [token, profileLoading, mustChangePassword, activePage, loadEmailInbox]);
 
   async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
@@ -785,7 +733,7 @@ function App() {
       const response = await axios.post<{ sent?: boolean; message?: string }>(`${CORE_URL}/api/email-drafts/${emailDraftEditor.id}/send`, { reason: "No match notification reviewed by associate" }, { headers: authHeaders() });
       if (!response.data.sent) { setEmailDraftError(response.data.message || "The email was not sent."); return; }
       notify("Email sent.", "success"); setEmailDraftEditor(null); setNoMatchDraft(null); setSelectedInvoice(null);
-      await Promise.all([loadInvoices(), loadCommandCenter()]);
+      await loadInvoices();
     } catch (error) { setEmailDraftError(getError(error, "Could not send the email.")); }
     finally { setEmailDraftBusy(false); }
   }
@@ -930,39 +878,6 @@ function App() {
     finally { setEmailBusy(false); }
   }
 
-  async function submitCommandAction() {
-    if (!commandAction) return;
-    const { bill, action } = commandAction;
-    const base = `${CORE_URL}/api/invoices/${bill.invoice_id}`;
-    let endpoint = "";
-    let body: Record<string, unknown> = {};
-    if (action === "approve") endpoint = "approve";
-    else if (action === "reject" || action === "hold" || action === "escalate") {
-      if (commandActionReason.trim().length < 3) { notify("Enter a reason with at least 3 characters.", "error"); return; }
-      endpoint = action;
-      body = { reason: commandActionReason.trim() };
-    } else if (action === "reassign") {
-      if (commandActionReason.trim().length < 3) { notify("Enter a reason with at least 3 characters.", "error"); return; }
-      if (!commandOwnerId) { notify("Choose an active associate.", "error"); return; }
-      endpoint = action;
-      body = { reason: commandActionReason.trim(), owner_user_id: commandOwnerId };
-    } else if (action === "pay") {
-      if (!commandPaidDate || !commandPaymentReference.trim()) { notify("Enter the payment date and reference.", "error"); return; }
-      endpoint = action;
-      body = { paid_date: commandPaidDate, method: commandPaymentMethod, reference: commandPaymentReference.trim() };
-    } else if (action === "resubmit") endpoint = "resubmit";
-    else { notify("This action is not available yet.", "info"); return; }
-
-    setCommandActionBusy(true);
-    try {
-      await axios.post(`${base}/${endpoint}`, body, { headers: authHeaders() });
-      notify(`${humanize(action)} completed.`, "success");
-      setCommandAction(null);
-      await Promise.all([loadCommandCenter(), loadInvoices()]);
-    } catch (error) {
-      notify(getError(error, `Could not ${action} this invoice.`), "error");
-    } finally { setCommandActionBusy(false); }
-  }
 
   const filteredDocs = useMemo(() => documents.filter(doc => {
     const q = `${docSearch} ${globalSearch}`.trim().toLowerCase();
@@ -977,7 +892,6 @@ function App() {
   function navigateTo(page: WorkspacePage) {
     setActivePage(page);
     setMobileNavOpen(false);
-    if (page === "command-center" && activePage !== "command-center") updateInvoiceQuery({ status: "" });
     if (page === "invoices" && activePage !== "invoices" && invoiceQuery.status && !invoiceStatuses.includes(invoiceQuery.status as InvoiceItem["status"])) updateInvoiceQuery({ status: "" });
   }
 
@@ -1018,12 +932,11 @@ function App() {
       onMobileClose={() => setMobileNavOpen(false)}
       onNavigate={page => {
         setActivePage(page);
-        if (page === "command-center") updateInvoiceQuery({ status: "" });
       }}
       onSignOut={() => void logout()}
       signOutDisabled={authBusy}
     />
-    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "command-center" ? "Command Center" : activePage === "invoices" ? "Invoices" : activePage === "purchase-orders" ? "Purchase Orders" : activePage === "goods-receipts" ? "Goods Receipts" : activePage === "vendors" ? "Vendors" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "command-center" && activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
+    <main className="main-area"><header className="topbar"><button className="topbar-nav-toggle" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(value => !value)}><Menu {...iconProps}/></button><div className="topbar-title"><span className="muted">Workspace</span><span className="breadcrumb-separator">/</span><b>{activePage === "logs" ? "Logs" : activePage === "associates" && profile?.role === "admin" ? "Associates" : activePage === "invoices" ? "Invoices" : activePage === "purchase-orders" ? "Purchase Orders" : activePage === "goods-receipts" ? "Goods Receipts" : activePage === "vendors" ? "Vendors" : activePage === "documents" ? "Documents" : activePage === "email" ? "Email inbox" : "Dashboard"}</b></div>{activePage !== "logs" && <label className="topbar-search"><Search {...iconProps}/><input value={globalSearch} onChange={event => { setGlobalSearch(event.target.value); updateInvoiceQuery({ search: event.target.value }); }} placeholder="Search invoices or documents" aria-label="Search invoices or documents" /></label>}<button className="topbar-user" aria-label={`Signed in as ${email}`}><span className="avatar">{(email[0] || "U").toUpperCase()}</span><span className="topbar-user-email">{profile?.name || email}</span><ChevronDown {...iconProps}/></button></header>
       <div className="content">
       {activePage === "logs" ? canAccessLogs(profile?.role) ? <LogsPage coreUrl={CORE_URL} authHeaders={authHeaders} vendors={filterVendors} owners={filterOwners} userNames={{ ...Object.fromEntries(associates.map(user => [user.id, user.name])), ...(readAccessClaims(token)?.sub ? { [readAccessClaims(token)!.sub]: profile?.name || profile?.email || "Admin" } : {}) }} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }}/> : <section className="panel"><p>You do not have access</p></section> : activePage === "email" ? <EmailInboxWorkspace status={emailStatus} messages={emailMessages} total={emailTotal} filter={emailFilter} onFilter={value => { setEmailPage(0); setEmailFilter(value); }} reason={emailReasonFilter} onReason={value => { setEmailPage(0); setEmailReasonFilter(value); }} page={emailPage} loading={emailLoading} busy={emailBusy} error={emailError} onPoll={() => void pollEmailNow()} onRetry={message => void retryEmailMessage(message)} onRefresh={() => void loadEmailInbox()} onPage={setEmailPage} onOpenDocument={id => { const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); else { setDocSource("email"); setActivePage("documents"); } }} onOpenInvoice={id => { setActivePage("invoices"); const found = invoices.find(invoice => invoice.invoice_id === id); if (found) void openInvoice(id); }} /> : activePage === "invoices" ? <InvoicesWorkspacePage invoices={invoices} counts={invoiceCounts} total={invoiceTotal} page={invoiceQuery.page} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} source={invoiceSource} loading={invoiceLoading} error={invoiceError} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onSource={value => setInvoiceSource(value)} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadInvoices()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onOpenDocument={id => { setActivePage("documents"); const doc = documents.find(item => item.id === id); if (doc) void openDocument(doc); }} /> : activePage === "purchase-orders" || activePage === "goods-receipts" ? <ProcurementWorkspacePage kind={activePage === "purchase-orders" ? "purchase_order" : "goods_receipt"} coreUrl={CORE_URL} authHeaders={authHeaders} onOpenInvoice={id => { setActivePage("invoices"); void openInvoice(id); }} onOpenPurchaseOrder={id => { setActivePage("purchase-orders"); setProcurementRecordId(id); }} onViewOriginal={id => void openOriginalSource(id)} onDownloadOriginal={id => void openOriginalSource(id, true)} onCheckVendor={(kind, row, po) => void checkProcurementVendor(kind, row, po)} invoices={invoices} openRecordId={procurementRecordId} onRecordOpened={() => setProcurementRecordId(null)} vendorNotice={unknownVendor?.recordType === (activePage === "purchase-orders" ? "purchase_order" : "goods_receipt") ? unknownVendor : null} vendorVendors={filterVendors} canAddVendor={canCreateVendor(profile?.role)} vendorBusy={unknownVendorBusy} vendorError={unknownVendorError} onAddVendor={() => { if (unknownVendor) setUnknownVendor(unknownVendor); }} onSelectVendor={vendorId => void selectExistingVendor(vendorId)} /> : activePage === "vendors" ? <VendorsPage coreUrl={CORE_URL} authHeaders={authHeaders} isAdmin={profile?.role === "admin"} canCreateVendor={canCreateVendor(profile?.role)} /> : activePage === "associates" && profile?.role === "admin" ? <>
         <section className="panel admin-associate-panel">
@@ -1041,8 +954,8 @@ function App() {
           {associatesError && <div className="notice error">{associatesError}<button onClick={() => void loadAssociates()}>Try again</button></div>}
           {associatesLoading ? <LoadingPanel title="Loading associates" subtitle="Retrieving active accounts..."/> : associates.filter(item => item.is_active).length ? <div className="table-wrap scroll-reveal"><table><thead><tr><th>NAME</th><th>EMAIL</th><th>ADDED</th><th></th></tr></thead><tbody>{associates.filter(item => item.is_active).map(associate => <tr key={associate.id}><td>{associate.name}</td><td>{associate.email}</td><td>{dateLabel(associate.created_at)}</td><td className="associate-actions"><button className="secondary" onClick={() => void resetAssociatePassword(associate)} disabled={authBusy}>Reset password</button><button className="secondary" onClick={() => void removeAssociate(associate)}>Remove access</button></td></tr>)}</tbody></table></div> : <EmptyState title="No associates yet" description="Add an associate using the form above."/>}
         </section>
-      </> : activePage === "command-center" ? <CommandCenter bucket={(invoiceQuery.bucket || "ready_to_pay") as CommandBucket} summary={commandSummary} bills={commandBills} total={commandTotal} page={invoiceQuery.page} pageSize={25} filters={invoiceQuery} vendors={filterVendors} owners={filterOwners} confidences={commandConfidences} loading={commandLoading} error={commandError} onBucket={bucket => updateInvoiceQuery({ bucket, sort_by: bucket === "overdue" ? "days_overdue" : "due_date", sort_dir: bucket === "overdue" ? "desc" : "asc" })} onFilter={patch => updateInvoiceQuery(patch)} onVendorSearch={searchFilterVendors} onPage={page => updateInvoiceQuery({ page }, false)} onRefresh={() => void loadCommandCenter()} onOpen={id => void openInvoice(id)} onAction={(bill, action) => { setCommandAction({ bill, action }); setCommandActionReason(""); setCommandOwnerId(""); setCommandPaymentReference(""); setCommandPaidDate(new Date().toISOString().slice(0, 10)); }}/>: activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
-        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.doc,.docx,.eml" onChange={event => { const files = Array.from(event.target.files || []); if (files.length) void uploadFiles(files); event.target.value = ""; }} disabled={uploading} hidden /></label></header>
+      </> : activePage === "dashboard" ? <DashboardWorkspace invoices={invoices} counts={invoiceCounts} loading={invoiceLoading} error={invoiceError} search={globalSearch} emailStatus={emailStatus} onEmail={() => setActivePage("email")} onPollEmail={() => void pollEmailNow()} onOpen={invoice => void openInvoice(invoice.invoice_id)} onInvoices={() => setActivePage("invoices")} onDocuments={() => setActivePage("documents")} onRefresh={() => void loadInvoices()} /> : <>
+        <header className="welcome"><div><span className="eyebrow purple">FINANCE OPERATIONS</span><h1>Documents</h1><p className="muted">Upload, find, and monitor every document in one place.</p></div><label className={`primary upload ${uploading ? "disabled" : ""}`}><span>＋</span> {uploading ? "Uploading…" : "Upload documents"}<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx,.eml" onChange={event => { const files = Array.from(event.target.files || []); if (files.length) void uploadFiles(files); event.target.value = ""; }} disabled={uploading} hidden /></label></header>
         {uploading && <div className="compact-upload-progress panel">
           <div className="compact-upload-status"><DocumentLoader/><span>Uploading documents... {uploadProgress}%</span></div>
           <div className="progress-track"><span style={{ width: `${uploadProgress}%` }}/></div>
@@ -1111,7 +1024,7 @@ function App() {
       </div>
     )}
     {emailDraftEditor && emailDraftOpened && <div className="modal-backdrop email-draft-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !emailDraftBusy) setEmailDraftEditor(null); }}><section className="modal email-draft-modal" role="dialog" aria-modal="true" aria-labelledby="email-draft-title"><header className="modal-head"><div><span className="eyebrow">NO MATCH EMAIL</span><h2 id="email-draft-title">Review email draft</h2></div><button className="modal-close" aria-label="Close email draft" disabled={emailDraftBusy} onClick={() => setEmailDraftEditor(null)}>?</button></header><div className="modal-body"><label className="form-label">Recipient<input type="text" value={emailDraftRecipient} onChange={event => setEmailDraftRecipient(event.target.value)} required aria-label="Email recipient"/></label><label className="form-label">Subject<input value={emailDraftSubject} onChange={event => setEmailDraftSubject(event.target.value)} required/></label><label className="form-label">Body<textarea value={emailDraftBody} onChange={event => setEmailDraftBody(event.target.value)} required rows={10}/></label>{emailDraftError && <div className="notice error" role="alert">{emailDraftError}</div>}<div className="modal-actions"><Button variant="secondary" onClick={() => setEmailDraftEditor(null)} disabled={emailDraftBusy}>Close</Button><Button variant="primary" onClick={() => void sendNoMatchDraft()} disabled={!emailDraftOpened || emailDraftBusy || !emailDraftRecipient.trim() || !emailDraftSubject.trim() || !emailDraftBody.trim()}>{emailDraftBusy ? "Sending?" : "Send"}</Button></div></div></section></div>}
-    {commandAction && <div className="modal-backdrop command-action-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !commandActionBusy) setCommandAction(null); }}><form className="modal command-action-modal" role="dialog" aria-modal="true" aria-labelledby="command-action-title" onSubmit={event => { event.preventDefault(); void submitCommandAction(); }}><header className="modal-head"><div><span className="eyebrow">INVOICE ACTION</span><h2 id="command-action-title">{humanize(commandAction.action)} invoice</h2></div><button className="modal-close" type="button" onClick={() => setCommandAction(null)} disabled={commandActionBusy} aria-label="Cancel">×</button></header><div className="modal-body"><p>Confirm {humanize(commandAction.action).toLowerCase()} for <strong>{commandAction.bill.vendor_name || "Unknown vendor"}</strong> · <strong>{formatInvoiceMoney(commandAction.bill.total_amount, commandAction.bill.currency)}</strong>?</p>{commandAction.action === "pay" && <><label className="form-label">Payment date<input type="date" value={commandPaidDate} onChange={event => setCommandPaidDate(event.target.value)} required/></label><label className="form-label">Payment method<select value={commandPaymentMethod} onChange={event => setCommandPaymentMethod(event.target.value)}><option value="bank_transfer">Bank transfer</option><option value="cheque">Cheque</option><option value="upi">UPI</option><option value="cash">Cash</option><option value="other">Other</option></select></label><label className="form-label">Payment reference<input value={commandPaymentReference} onChange={event => setCommandPaymentReference(event.target.value)} required maxLength={200}/></label></>}{["reject", "hold", "escalate", "reassign"].includes(commandAction.action) && <label className="form-label">Reason<textarea value={commandActionReason} onChange={event => setCommandActionReason(event.target.value)} required minLength={3} maxLength={1000} rows={4} placeholder="Enter a reason"/></label>}{commandAction.action === "reassign" && <label className="form-label">Assign to<select value={commandOwnerId} onChange={event => setCommandOwnerId(event.target.value)} required><option value="">Choose an associate</option>{filterOwners.map(owner => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>}<div className="modal-actions"><Button type="button" variant="secondary" onClick={() => setCommandAction(null)} disabled={commandActionBusy}>Cancel</Button><Button type="submit" variant={commandAction.action === "reject" ? "danger" : "primary"} disabled={commandActionBusy}>{commandActionBusy ? "Saving…" : `Confirm ${humanize(commandAction.action).toLowerCase()}`}</Button></div></div></form></div>}{decision && <div className="modal-backdrop reason-backdrop" role="presentation"><form className="modal reason-modal" onSubmit={submitInvoiceDecision}><header className="modal-head"><div><span className="eyebrow purple">REVIEW DECISION</span><h2>{decision.action === "hold" ? "Place invoice on hold" : decision.action === "reject" ? "Reject invoice" : decision.action === "approve" ? "Approve invoice" : "Approve with exception"}</h2></div><button className="modal-close" type="button" onClick={() => setDecision(null)} aria-label="Cancel">×</button></header><div className="modal-body"><label className="form-label">{decision.action === "approve" ? "Approval notes (optional)" : "Reason"}<textarea value={decision.reason} onChange={event => setDecision({ ...decision, reason: event.target.value })} required={decision.action !== "approve"} minLength={decision.action === "approve" ? 0 : 3} maxLength={1000} rows={4} placeholder={decision.action === "approve" ? "Optional approval notes" : "Explain this decision"} /></label><div className="modal-actions"><button className="secondary" type="button" onClick={() => setDecision(null)}>Cancel</button><button className="primary" type="submit">{decision.action === "approve" ? "Confirm approval" : "Save decision"}</button></div></div></form></div>}
+    {decision && <div className="modal-backdrop reason-backdrop" role="presentation"><form className="modal reason-modal" onSubmit={submitInvoiceDecision}><header className="modal-head"><div><span className="eyebrow purple">REVIEW DECISION</span><h2>{decision.action === "hold" ? "Place invoice on hold" : decision.action === "reject" ? "Reject invoice" : decision.action === "approve" ? "Approve invoice" : "Approve with exception"}</h2></div><button className="modal-close" type="button" onClick={() => setDecision(null)} aria-label="Cancel">×</button></header><div className="modal-body"><label className="form-label">{decision.action === "approve" ? "Approval notes (optional)" : "Reason"}<textarea value={decision.reason} onChange={event => setDecision({ ...decision, reason: event.target.value })} required={decision.action !== "approve"} minLength={decision.action === "approve" ? 0 : 3} maxLength={1000} rows={4} placeholder={decision.action === "approve" ? "Optional approval notes" : "Explain this decision"} /></label><div className="modal-actions"><button className="secondary" type="button" onClick={() => setDecision(null)}>Cancel</button><button className="primary" type="submit">{decision.action === "approve" ? "Confirm approval" : "Save decision"}</button></div></div></form></div>}
     {uploadResult && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setUploadResult(null); }}><section className="modal results-modal" role="dialog" aria-modal="true" aria-labelledby="upload-result-title"><header className="modal-head"><div><span className="eyebrow purple">UPLOAD SUMMARY</span><h2 id="upload-result-title">{uploadResult.successes} of {uploadResult.total} files uploaded</h2><p className="muted">Each result below comes from the upload request.</p></div><button className="modal-close" onClick={() => setUploadResult(null)} aria-label="Close upload summary">×</button></header><div className="modal-body"><div className="outcome-list">{uploadResult.outcomes.map((outcome, index) => <div className="outcome-row" key={`${outcome.name}-${index}`}><span className={`outcome-icon ${outcome.ok ? "ok" : "bad"}`}>{outcome.ok ? "✓" : "!"}</span><div><b>{outcome.name}</b><small>{outcome.message}</small></div></div>)}</div><div className="modal-actions"><button className="secondary" onClick={() => setUploadResult(null)}>Close</button><button className="primary" onClick={() => setUploadResult(null)}>View documents</button></div></div></section></div>}
   </div>;
 }
@@ -1339,7 +1252,7 @@ function DashboardWorkspace({ invoices, counts, loading, error, search, emailSta
       <KpiCard label="Total invoices" value={total} tone="accent" icon={<FileText {...iconProps}/>} onClick={onInvoices}/>
       <KpiCard label="Needs review" value={counts.needs_review} tone="amber" icon="!" onClick={onInvoices}/>
       <KpiCard label="Ready to pay" value={counts.ready_to_pay} tone="green" icon={<Check {...iconProps}/>} onClick={onInvoices}/>
-      <KpiCard label="On hold" value={counts.on_hold} tone="gray" icon="â…¡" onClick={onInvoices}/>
+      <KpiCard label="On hold" value={counts.on_hold} tone="gray" icon={<Clock {...iconProps}/>} onClick={onInvoices}/>
     </section>
     <section className="dashboard-grid">
       <Card className="dashboard-card status-distribution"><div className="section-heading"><div><span className="eyebrow purple">PORTFOLIO</span><h2>Status distribution</h2><p className="muted">Current invoice totals by workflow status.</p></div><button className="text-link" onClick={onInvoices}>View invoices <span aria-hidden="true"><ArrowRight {...iconProps}/></span></button></div>
